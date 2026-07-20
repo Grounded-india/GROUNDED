@@ -46,8 +46,8 @@ D:\PROJECTS\news\
       google_news.py        # GoogleNewsSource dataclass (Google News search RSS)
       sources.py            # registers all 12 sources
 
-    pipeline\               # empty; Layer 2 lives here
-    agents\                 # empty; Layer 3 lives here
+    pipeline\               # Layer 2 (built): embed, cluster, importance, scrape
+    agents\                 # Layer 3 (built): five-agent story-building crew
 ```
 
 ## Database schema (relevant bits for Layer 2)
@@ -268,3 +268,89 @@ Real content lift where it worked: AP World Cup story `93 chars` to `39,730 char
 4. **Reddit comment pages give no meaningful body via trafilatura.** They can still be topic radar, but we do not get citable text from them.
 
 None of these block Layer 3 for the events that scraped successfully (~52 items across the top 20 events).
+
+## Update after Layer 3 was built (2026-07-21)
+
+Layer 3 (Multi-Agent Story Building) is implemented as a **self-contained `grounded/agents/` package**. It only *reads* the shared `config` / `db` / `models` and never edits Layer 1/2 modules, so it can be developed in parallel with someone still working on Layer 1/2 without merge conflicts. It has its own CLI (`python -m grounded.agents`) separate from the `grounded` CLI.
+
+### The five-agent crew
+
+One `selected` event (Layer 2 output) → one grounded story package:
+
+| Agent                       | Model    | Job                                                                 |
+| --------------------------- | -------- | ------------------------------------------------------------------ |
+| Fact Extractor              | Nemotron | Pull atomic, verifiable claims, each grounded to source item IDs    |
+| Primary Source Verifier     | Gemini   | Deterministic backing rules + optional semantic demotion            |
+| Context Agent               | Nemotron | Grounded background — why this matters                              |
+| Perspective Agent           | Nemotron | Multi-agent debate — steel-man both sides from facts                |
+| Editor / Hallucination Auditor | Gemini | Deterministic gate + cut-only audit + headline/dek                 |
+
+### Generation vs. enforcement split (the un-gameable core)
+
+- **Generation** (extraction, context, perspective) runs on an LLM backend (Nemotron), with a **deterministic offline fallback** so the whole crew runs with no API key — mirrors the local embedding backend in Layer 2.
+- **Enforcement** (verification rules, grounding to real source IDs, the editor approval gate) is plain, unit-tested Python. A claim is `verified` only if PRIMARY (tier-1) anchored OR corroborated by ≥2 distinct outlets. The LLM can only ever make things **stricter** (demote / cut), never promote.
+
+### Model routing
+
+`grounded/agents/router.py` maps each role to a backend via `ROLE_PROVIDER`. Backends are OpenAI-compatible (`grounded/agents/llm.py`):
+
+- Nemotron via NVIDIA NIM (`NVIDIA_API_KEY`, base `https://integrate.api.nvidia.com/v1`, model `nvidia/llama-3.3-nemotron-super-49b-v1.5`).
+- Gemini via the OpenAI-compatible endpoint (`GEMINI_API_KEY`, base `.../v1beta/openai/`, model `gemini-2.5-flash`).
+- Any role with no key falls back to the deterministic `LocalBackend`.
+
+Keys are read from the environment or `.env`. **Requires `pip install openai`** (intentionally kept out of `pyproject.toml` for now to avoid a merge conflict with the person on Layer 1/2 — add it to deps when the branches merge).
+
+### Detail-level fidelity check (catches half-truths, incl. government cites)
+
+Both the Verifier and Editor compare each claim to its cited source at the level of **every specific detail** (numbers, dates, names, amounts, scope, qualifiers) and split problems into two buckets:
+
+- **`contradicted` / half-truth** — conflicts with the source, or asserts a detail the source never states. **Always** demoted (verifier) and **cut** (editor), with *no* tier-1 exemption and *no* cap. A claim citing a real PIB release but misstating a figure is removed even if it's the only claim; a story that is only a half-lie is rejected.
+- **`unsupported`** (no direct conflict) — handled subject to anti-over-pruning guardrails so a borderline model call can't gut a story: soft demotions/cuts skip primary-anchored claims, are capped at ~50% per pass, and never remove the last verified claim.
+
+This was a deliberate design decision: official/government-cited news is held to the same detail-accuracy bar as everything else, but the pipeline stays efficient and doesn't over-reject good coverage.
+
+### Debate mode
+
+Ground-reality events with no primary source (protests, incidents, Reddit-surfaced stories) are **not** rejected. The Perspective Agent runs a multi-agent debate that steel-mans both sides from grounded facts, and the Editor approves the story in `debate` mode — clearly labelled as a fact-based debate rather than confirmed reporting.
+
+### Files added
+
+```
+grounded/agents/
+  __init__.py        # package entry (build_story, build_stories)
+  __main__.py        # `python -m grounded.agents` CLI
+  schemas.py         # EventView, SourceDoc, ClaimDraft, VerifiedClaim, StoryPackage
+  llm.py             # pluggable OpenAI-compatible backends + local fallback + JSON helpers
+  router.py          # per-agent model routing (ROLE_PROVIDER, ModelRouter)
+  fact_extractor.py  # Nemotron; extractive local fallback; grounds claims to source IDs
+  verifier.py        # deterministic backing + optional Gemini demote-only fidelity check
+  context.py         # Nemotron grounded background
+  debate.py          # multi-agent debate engine
+  perspective.py     # delegates to debate.py
+  editor.py          # deterministic gate + Gemini cut-only audit + headline/dek
+  loader.py          # read-only DB access: pull selected events + their sources
+  store.py           # persist StoryPackage into stories/claims/claim_sources (idempotent)
+  runner.py          # orchestration: load → crew → store; returns model + debate summary
+```
+
+Tests added under `tests/`: `test_agents_llm.py`, `test_agents_router.py`, `test_agents_fact_extractor.py`, `test_agents_verifier.py`, `test_agents_debate.py`, `test_agents_editor.py`, `test_agents_crew.py` (offline full-crew), `test_agents_db.py` (Postgres round-trip). Full suite: **94 passing**.
+
+### How to run Layer 3
+
+```
+# offline (no keys needed) — deterministic floor only, no semantic fidelity check
+python -m grounded.agents build --limit 5
+
+# with models — enables the detail-level fidelity check
+pip install openai
+# add to .env: NVIDIA_API_KEY=...  and  GEMINI_API_KEY=...
+python -m grounded.agents build --limit 5
+```
+
+Output reports the per-role model in use, how many stories were built/approved/rejected, and how many were approved as debates.
+
+### Known limitations Layer 4 should plan around
+
+1. **Semantic fidelity check needs a real backend.** In pure offline mode only the deterministic floor runs; the contradiction/half-truth check is skipped (claims are still grounded and gated, just not detail-checked by an LLM).
+2. **`openai` is not yet in `pyproject.toml`** (kept out to avoid a merge conflict). Add it when the Layer 1/2 branch merges.
+3. **Reuters / paywalled bodies still missing** (carried over from Layer 2.5) — those events fall back to RSS-summary text, which yields fewer extractable claims.

@@ -162,6 +162,7 @@ def _feat(anchor: bool) -> EventFeatures:
         has_tier2=False,
         signal_only=not anchor,
         policy_impact_hits=0,
+        ground_reality_hits=0,
         downweight_hits=0,
         recency_hours=1.0,
     )
