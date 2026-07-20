@@ -38,6 +38,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["grounded"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require a running Postgres (deselect with '-m \"not integration\"').",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
