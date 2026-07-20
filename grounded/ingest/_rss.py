@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -41,7 +41,7 @@ def _extract_published(entry: dict) -> datetime | None:
             try:
                 dt = dateparser.parse(val)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return dt
             except (ValueError, TypeError):
                 continue
