@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from grounded.pipeline.importance import (
+    EventFeatures,
     ItemView,
     extract_features,
     score_event,
     score_features,
+    select_event_ids,
 )
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -145,3 +147,56 @@ def test_score_never_negative():
         _item("reddit_india", 3, "viral meme", "netizens trolls outrage backlash slams spat", 1)
     ]
     assert score_event(trash, now=NOW)[0] >= 0.0
+
+
+# --- selection (pure logic behind rank_events) --------------------------
+
+
+def _feat(anchor: bool) -> EventFeatures:
+    return EventFeatures(
+        num_items=1,
+        distinct_sources=1,
+        tier1_sources=1 if anchor else 0,
+        tier2_sources=0,
+        has_tier1=anchor,
+        has_tier2=False,
+        signal_only=not anchor,
+        policy_impact_hits=0,
+        downweight_hits=0,
+        recency_hours=1.0,
+    )
+
+
+ANCHORED = _feat(True)
+SOCIAL = _feat(False)
+
+
+def test_select_picks_highest_scores_first():
+    scored = [("a", 3.0, ANCHORED), ("b", 9.0, ANCHORED), ("c", 6.0, ANCHORED)]
+    assert select_event_ids(scored, top_n=2) == ["b", "c"]
+
+
+def test_select_respects_top_n():
+    scored = [(str(i), float(i), ANCHORED) for i in range(10)]
+    assert len(select_event_ids(scored, top_n=5)) == 5
+
+
+def test_select_excludes_social_only_events():
+    scored = [("anchor", 1.0, ANCHORED), ("viral", 99.0, SOCIAL)]
+    # even with a huge score, a social-only event never advances
+    assert select_event_ids(scored, top_n=5) == ["anchor"]
+
+
+def test_select_excludes_zero_scores():
+    scored = [("live", 2.0, ANCHORED), ("dead", 0.0, ANCHORED)]
+    assert select_event_ids(scored, top_n=5) == ["live"]
+
+
+def test_select_is_deterministic_on_ties():
+    scored = [("z", 5.0, ANCHORED), ("a", 5.0, ANCHORED), ("m", 5.0, ANCHORED)]
+    # ties break toward the lower id, so results are stable across runs
+    assert select_event_ids(scored, top_n=2) == ["a", "m"]
+
+
+def test_select_empty_pool():
+    assert select_event_ids([], top_n=5) == []

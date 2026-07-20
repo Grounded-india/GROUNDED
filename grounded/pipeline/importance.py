@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from grounded.config import settings
 from grounded.db import cursor
@@ -183,8 +184,14 @@ def score_event(items: list[ItemView], now: datetime | None = None) -> tuple[flo
     return score_features(features), features
 
 
-def _load_candidate_events() -> dict:
-    """Return {event_id: [ItemView, ...]} for all candidate events."""
+def _load_rankable_events() -> dict:
+    """
+    Return {event_id: [ItemView, ...]} for every re-rankable event.
+
+    Both ``candidate`` and ``selected`` events are rankable so each run can
+    re-select from the full pool (and demote stale selections). ``published``
+    and ``rejected`` are terminal, Layer-3-owned states and are left untouched.
+    """
     with cursor() as cur:
         cur.execute(
             """
@@ -197,10 +204,10 @@ def _load_candidate_events() -> dict:
             FROM events e
             JOIN event_items ei ON ei.event_id = e.id
             JOIN raw_items r    ON r.id = ei.raw_item_id
-            WHERE e.status = %s
+            WHERE e.status IN (%s, %s)
             ORDER BY e.id
             """,
-            (EventStatus.CANDIDATE,),
+            (EventStatus.CANDIDATE, EventStatus.SELECTED),
         )
         rows = cur.fetchall()
 
@@ -218,23 +225,45 @@ def _load_candidate_events() -> dict:
     return events
 
 
+def select_event_ids(
+    scored: list[tuple[Any, float, EventFeatures]], top_n: int
+) -> list[Any]:
+    """
+    Pick the ids of the top ``top_n`` events eligible for Layer 3.
+
+    Eligible = primary/wire-anchored with a positive score; social-only events
+    never advance. Pure function of its inputs so it is deterministic and
+    unit-testable without a DB. Ties break toward the lower id for stability.
+    """
+    eligible = [
+        (eid, score) for (eid, score, feat) in scored if feat.tier_1_anchor and score > 0
+    ]
+    eligible.sort(key=lambda x: (-x[1], str(x[0])))
+    return [eid for eid, _ in eligible[:top_n]]
+
+
 def rank_events(top_n: int | None = None, now: datetime | None = None) -> dict:
     """
-    Score every candidate event, persist scores, and promote the top events to
-    ``selected`` so Layer 3 can pick them up.
+    Score every re-rankable event, persist scores, and re-select the top events
+    as ``selected`` for Layer 3.
 
-    Only events with a primary/wire anchor are eligible for selection —
-    social-only events never advance. Returns a small summary dict.
+    Idempotent: each run recomputes scores over the full candidate+selected pool
+    and re-selects from scratch, demoting any previously-selected event that no
+    longer makes the cut back to ``candidate``. Running it twice in a row yields
+    the same selection (modulo recency drift) — selections never accumulate.
+
+    Only events with a primary/wire anchor are eligible; social-only events
+    never advance. Returns a small summary dict.
     """
     top_n = settings.select_top_n if top_n is None else top_n
     now = now or datetime.now(UTC)
 
-    events = _load_candidate_events()
+    events = _load_rankable_events()
     if not events:
-        log.info("no candidate events to rank")
-        return {"scored": 0, "selected": 0}
+        log.info("no rankable events")
+        return {"scored": 0, "selected": 0, "demoted": 0}
 
-    scored: list[tuple[object, float, EventFeatures]] = []
+    scored: list[tuple[Any, float, EventFeatures]] = []
     with cursor() as cur:
         for event_id, items in events.items():
             score, features = score_event(items, now=now)
@@ -244,18 +273,30 @@ def rank_events(top_n: int | None = None, now: datetime | None = None) -> dict:
             )
             scored.append((event_id, score, features))
 
-    eligible = [
-        (eid, score) for (eid, score, feat) in scored if feat.tier_1_anchor and score > 0
-    ]
-    eligible.sort(key=lambda x: x[1], reverse=True)
-    selected_ids = [eid for eid, _ in eligible[:top_n]]
+    selected_ids = select_event_ids(scored, top_n)
+    selected_set = set(selected_ids)
+    demote_ids = [eid for eid, _, _ in scored if eid not in selected_set]
 
-    if selected_ids:
-        with cursor() as cur:
+    demoted = 0
+    with cursor() as cur:
+        if selected_ids:
             cur.execute(
                 "UPDATE events SET status = %s WHERE id = ANY(%s)",
                 (EventStatus.SELECTED, selected_ids),
             )
+        if demote_ids:
+            # Only rows actually leaving 'selected' count as demotions, so a
+            # steady-state re-run reports 0 churn.
+            cur.execute(
+                "UPDATE events SET status = %s WHERE id = ANY(%s) AND status = %s",
+                (EventStatus.CANDIDATE, demote_ids, EventStatus.SELECTED),
+            )
+            demoted = cur.rowcount
 
-    log.info("scored %d events, selected %d", len(scored), len(selected_ids))
-    return {"scored": len(scored), "selected": len(selected_ids)}
+    log.info(
+        "scored %d events, selected %d, demoted %d",
+        len(scored),
+        len(selected_ids),
+        demoted,
+    )
+    return {"scored": len(scored), "selected": len(selected_ids), "demoted": demoted}

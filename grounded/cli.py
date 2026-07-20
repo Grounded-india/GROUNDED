@@ -175,7 +175,10 @@ def cmd_rank(top_n: int | None) -> None:
     from grounded.pipeline.importance import rank_events
 
     result = rank_events(top_n=top_n)
-    click.echo(f"Scored {result['scored']} event(s), selected {result['selected']}.")
+    click.echo(
+        f"Scored {result['scored']} event(s), selected {result['selected']}, "
+        f"demoted {result['demoted']}."
+    )
 
 
 @cli.command("pipeline")
@@ -191,7 +194,10 @@ def cmd_pipeline(top_n: int | None) -> None:
     created = build_events()
     click.echo(f"Created {created} event(s).")
     result = rank_events(top_n=top_n)
-    click.echo(f"Scored {result['scored']} event(s), selected {result['selected']}.")
+    click.echo(
+        f"Scored {result['scored']} event(s), selected {result['selected']}, "
+        f"demoted {result['demoted']}."
+    )
 
 
 @cli.command("events")

@@ -29,6 +29,22 @@ def _force_local_backend(monkeypatch):
     monkeypatch.setattr(settings, "embedding_backend", "local")
 
 
+@pytest.fixture(autouse=True)
+def _preserve_event_status():
+    """rank_events() rescans the whole events table, so it would otherwise leave
+    any real events in the shared dev DB re-ranked. Snapshot statuses before the
+    test and restore them after so these tests are non-destructive."""
+    from grounded.db import cursor
+
+    with cursor() as cur:
+        cur.execute("SELECT id, status FROM events")
+        snapshot = [(r["id"], r["status"]) for r in cur.fetchall()]
+    yield
+    with cursor() as cur:
+        for eid, status in snapshot:
+            cur.execute("UPDATE events SET status = %s WHERE id = %s", (status, eid))
+
+
 PREFIX = f"test_{uuid.uuid4().hex[:8]}"
 BASE = datetime.now(UTC) - timedelta(hours=2)
 
@@ -144,8 +160,10 @@ def test_embed_cluster_rank_end_to_end(seeded_db):
     multi = [e for e in events if e["n_sources"] >= 2]
     assert len(multi) == 2  # RBI (3 sources) and court (2 sources)
 
-    # 3) rank: scores populated, anchored events selected, signal-only not
-    result = rank_events()
+    # 3) rank: scores populated, anchored events selected, signal-only not.
+    # top_n is set generously so selection of our two anchored events is
+    # deterministic regardless of other events in the shared dev DB.
+    result = rank_events(top_n=10_000)
     assert result["scored"] >= 3
 
     events = new_events()
@@ -160,3 +178,34 @@ def test_embed_cluster_rank_end_to_end(seeded_db):
     # anchored events outrank the social-only one
     top_score = max(e["importance_score"] for e in selected)
     assert top_score > (signal[0]["importance_score"] or 0.0)
+
+
+@pytest.mark.integration
+def test_rank_is_idempotent(seeded_db):
+    """Running rank twice must not accumulate selections; it re-selects cleanly
+    from the full pool and yields the identical result."""
+    from grounded.db import cursor
+    from grounded.pipeline.clustering import build_events
+    from grounded.pipeline.embed import embed_pending
+    from grounded.pipeline.importance import rank_events
+
+    embed_pending()
+    build_events(similarity_threshold=0.5)
+
+    # pin `now` so both runs score identically (no recency drift between them)
+    now = datetime.now(UTC)
+
+    def selected_ids():
+        with cursor() as cur:
+            cur.execute("SELECT id FROM events WHERE status = 'selected' ORDER BY id")
+            return [r["id"] for r in cur.fetchall()]
+
+    r1 = rank_events(top_n=5, now=now)
+    sel1 = selected_ids()
+    r2 = rank_events(top_n=5, now=now)
+    sel2 = selected_ids()
+
+    # no accumulation: the selected set is stable and bounded by top_n
+    assert sel1 == sel2
+    assert len(sel1) == r1["selected"] == r2["selected"]
+    assert 0 < len(sel1) <= 5
