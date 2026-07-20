@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import httpx
 import trafilatura
+from bs4 import BeautifulSoup
 from googlenewsdecoder import gnewsdecoder
 
 from grounded.db import cursor
@@ -99,6 +100,104 @@ def _extract_body(url: str, html: str) -> str:
     return (text or "").strip()
 
 
+def _is_reddit(host: str) -> bool:
+    return host == "reddit.com" or host.endswith(".reddit.com")
+
+
+# How many top comments to include when scraping a Reddit post. Reddit is tier-3
+# (topic radar), so we keep the bodies compact but preserve real ground-signal
+# from the crowd - useful when a protest/incident thread has firsthand accounts.
+_REDDIT_TOP_COMMENTS = 8
+# Truncate any single comment past this length.
+_REDDIT_MAX_COMMENT_CHARS = 800
+
+
+def _fetch_reddit_body(client: httpx.Client, url: str) -> str:
+    """
+    Scrape a Reddit post from ``old.reddit.com`` HTML.
+
+    Reddit's JSON API is closed to unauthenticated clients (403 blocked),
+    and ``www.reddit.com`` is a JS-rendered SPA that returns an empty
+    shell to plain HTTP clients. ``old.reddit.com`` serves the exact
+    same live data (same posts, same time, same subreddits) via
+    server-rendered HTML that a normal ``httpx`` + ``BeautifulSoup``
+    pass can parse without any auth.
+
+    Extracts: post title, selftext (for text posts), linked URL (for link
+    posts), and the top-level comments. Nested reply chains are skipped
+    on purpose — Layer 3 does not need them.
+    """
+    # Rewrite www.reddit.com / reddit.com → old.reddit.com. Same data, scrapable HTML.
+    old_url = url
+    for prefix in ("://www.reddit.com/", "://reddit.com/"):
+        if prefix in old_url:
+            old_url = old_url.replace(prefix, "://old.reddit.com/", 1)
+            break
+
+    try:
+        resp = client.get(old_url, timeout=_PER_URL_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        log.warning("reddit fetch failed for %s: %s", old_url, e)
+        return ""
+
+    soup = BeautifulSoup(resp.text, "lxml")
+    parts: list[str] = []
+
+    # Title. old.reddit sets <title> to "Post title : subreddit" — strip the suffix.
+    title_tag = soup.find("title")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+        if " : " in title:
+            title = title.rsplit(" : ", 1)[0].strip()
+        if title:
+            parts.append(title)
+
+    # OP block: div.link.thing wraps the post itself.
+    op = soup.select_one("div.link.thing")
+    if op is not None:
+        # For text posts, the selftext is inside .expando .usertext-body.
+        body_div = op.select_one("div.expando div.usertext-body")
+        if body_div is not None:
+            selftext = body_div.get_text(separator=" ", strip=True)
+            if selftext:
+                parts.append(selftext)
+
+        # For link posts, capture the outbound URL so Layer 3 can follow it.
+        title_link = op.select_one("a.title")
+        if title_link is not None:
+            href = title_link.get("href") or ""
+            if href.startswith("http") and href != url:
+                parts.append(f"Linked URL: {href}")
+
+    # Top-level comments only (direct children of the top comment container).
+    comment_divs = soup.select("div.sitetable.nestedlisting > div.thing.comment")
+    top_comments: list[str] = []
+    for c in comment_divs:
+        if len(top_comments) >= _REDDIT_TOP_COMMENTS:
+            break
+        body_div = c.select_one("div.usertext-body")
+        if body_div is None:
+            continue
+        body_text = body_div.get_text(separator=" ", strip=True)
+        if not body_text or body_text in ("[deleted]", "[removed]"):
+            continue
+        author_el = c.select_one("a.author")
+        author = author_el.get_text(strip=True) if author_el else "unknown"
+        score_el = c.select_one("span.score.unvoted")
+        score = ""
+        if score_el is not None:
+            score = score_el.get("title") or score_el.get_text(strip=True)
+        if len(body_text) > _REDDIT_MAX_COMMENT_CHARS:
+            body_text = body_text[:_REDDIT_MAX_COMMENT_CHARS].rstrip() + "..."
+        top_comments.append(f"[u/{author} | {score}] {body_text}")
+
+    if top_comments:
+        parts.append("Top comments:\n" + "\n\n".join(top_comments))
+
+    return "\n\n".join(parts).strip()
+
+
 def _store(item_id, body: str) -> None:
     """
     Persist the scrape result. Empty string is stored intentionally so we do
@@ -146,6 +245,16 @@ def scrape_selected_events(force: bool = False) -> dict:
             if wait > 0:
                 time.sleep(wait)
             last_hit[host] = time.monotonic()
+
+            # Reddit needs the JSON API - HTML pages give trafilatura nothing.
+            if _is_reddit(host):
+                body = _fetch_reddit_body(client, url)
+                _store(row["id"], body)
+                if body:
+                    scraped += 1
+                else:
+                    failed += 1
+                continue
 
             try:
                 resp = client.get(url, timeout=_PER_URL_TIMEOUT_SECONDS)
