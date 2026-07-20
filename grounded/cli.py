@@ -8,11 +8,10 @@ import sys
 
 import click
 
-from grounded.config import settings
-from grounded.db import close_pool
-
 # Importing sources triggers registration into the ingest registry.
 import grounded.ingest.sources  # noqa: F401
+from grounded.config import settings
+from grounded.db import close_pool
 from grounded.ingest.base import all_sources, get_source, store_raw_items
 from grounded.models import SourceTier
 
@@ -145,6 +144,98 @@ def cmd_status() -> None:
                 f"{row['n']:<5}  "
                 f"{row['last_fetched'].strftime('%Y-%m-%d %H:%M:%S')}"
             )
+
+
+@cli.command("embed")
+@click.option("--limit", default=None, type=int, help="Max items to embed this run.")
+@click.option("--batch-size", default=128, help="Items per embedding batch.")
+def cmd_embed(limit: int | None, batch_size: int) -> None:
+    """Layer 2: fill embeddings for raw items that don't have one yet."""
+    from grounded.pipeline.embed import embed_pending
+
+    n = embed_pending(batch_size=batch_size, limit=limit)
+    click.echo(f"Embedded {n} item(s).")
+
+
+@cli.command("cluster")
+@click.option("--similarity", default=None, type=float, help="Cosine threshold (config default).")
+@click.option("--window-hours", default=None, type=float, help="Time window hours.")
+def cmd_cluster(similarity: float | None, window_hours: float | None) -> None:
+    """Layer 2: cluster embedded items into events."""
+    from grounded.pipeline.clustering import build_events
+
+    n = build_events(similarity_threshold=similarity, time_window_hours=window_hours)
+    click.echo(f"Created {n} event(s).")
+
+
+@cli.command("rank")
+@click.option("--top", "top_n", default=None, type=int, help="How many events to select.")
+def cmd_rank(top_n: int | None) -> None:
+    """Layer 2: score candidate events and select the top ones for Layer 3."""
+    from grounded.pipeline.importance import rank_events
+
+    result = rank_events(top_n=top_n)
+    click.echo(f"Scored {result['scored']} event(s), selected {result['selected']}.")
+
+
+@cli.command("pipeline")
+@click.option("--top", "top_n", default=None, type=int, help="How many events to select.")
+def cmd_pipeline(top_n: int | None) -> None:
+    """Layer 2: run embed -> cluster -> rank in one go."""
+    from grounded.pipeline.clustering import build_events
+    from grounded.pipeline.embed import embed_pending
+    from grounded.pipeline.importance import rank_events
+
+    embedded = embed_pending()
+    click.echo(f"Embedded {embedded} item(s).")
+    created = build_events()
+    click.echo(f"Created {created} event(s).")
+    result = rank_events(top_n=top_n)
+    click.echo(f"Scored {result['scored']} event(s), selected {result['selected']}.")
+
+
+@cli.command("events")
+@click.option("--limit", default=15, help="How many events to show.")
+@click.option("--status", "status", default=None, help="Filter by status (candidate/selected/...).")
+def cmd_events(limit: int, status: str | None) -> None:
+    """Show ranked events (highest importance first)."""
+    from grounded.db import cursor
+
+    query = """
+        SELECT e.id, e.title, e.importance_score, e.tier_1_anchor, e.status,
+               e.last_seen_at,
+               (SELECT COUNT(*) FROM event_items ei WHERE ei.event_id = e.id) AS n_items,
+               (SELECT COUNT(DISTINCT r.source_name)
+                  FROM event_items ei JOIN raw_items r ON r.id = ei.raw_item_id
+                 WHERE ei.event_id = e.id) AS n_sources
+        FROM events e
+        {where}
+        ORDER BY e.importance_score DESC NULLS LAST, e.last_seen_at DESC
+        LIMIT %s
+    """
+    params: tuple = ()
+    where = ""
+    if status:
+        where = "WHERE e.status = %s"
+        params = (status,)
+    params = params + (limit,)
+
+    with cursor() as cur:
+        cur.execute(query.format(where=where), params)
+        rows = cur.fetchall()
+
+    if not rows:
+        click.echo("No events.")
+        return
+    for row in rows:
+        score = row["importance_score"]
+        score_str = f"{score:5.2f}" if score is not None else "  n/a"
+        anchor = "T1/2" if row["tier_1_anchor"] else "sig "
+        title = (row["title"] or "(no title)")[:70]
+        click.echo(
+            f"[{score_str}] {anchor} {row['status']:<9} "
+            f"src={row['n_sources']:<2} items={row['n_items']:<3} {title}"
+        )
 
 
 @cli.command("recent")
