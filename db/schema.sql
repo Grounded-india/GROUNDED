@@ -23,6 +23,8 @@ CREATE TABLE raw_items (
     fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     embedding     VECTOR(1024),                -- filled by pipeline/embed.py (voyage-3 = 1024 dims)
     raw_data      JSONB,                       -- original feed entry / API response
+    full_content              TEXT,            -- populated by pipeline/scrape.py for items in selected events
+    full_content_fetched_at   TIMESTAMPTZ,
     UNIQUE (source_name, source_url)
 );
 

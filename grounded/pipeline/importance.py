@@ -59,6 +59,21 @@ DOWNWEIGHT_KEYWORDS: tuple[str, ...] = (
     "shocking", "you won't believe", "sensational", "gossip",
 )
 
+# Ground-reality events: protests, incidents, resignations, court verdicts,
+# etc. Scored equal to policy keywords so multi-source non-government stories
+# can rank alongside government press releases instead of always losing to
+# them. Matched case-insensitively as substrings of title+content.
+GROUND_REALITY_KEYWORDS: tuple[str, ...] = (
+    "protest", "march", "rally", "strike", "shutdown", "blockade", "bandh",
+    "clash", "violence", "riot", "lathi", "teargas", "water cannon",
+    "arrest", "detained", "custody", "remand", "chargesheet", "fir ",
+    "killed", "injured", "dead", "casualties", "victim", "died", "death toll",
+    "resignation", "resigned", "dismissed", "sacked", "suspended",
+    "inquiry", "probe", "investigation", "scandal", "allegation", "accused",
+    "verdict", "acquittal", "conviction", "guilty", "sentenced",
+    "explosion", "attack", "assault", "raid", "seized",
+)
+
 
 @dataclass
 class ItemView:
@@ -81,9 +96,11 @@ class EventFeatures:
     has_tier2: bool
     signal_only: bool
     policy_impact_hits: int
+    ground_reality_hits: int
     downweight_hits: int
     recency_hours: float
     matched_policy_keywords: list[str] = field(default_factory=list)
+    matched_ground_reality_keywords: list[str] = field(default_factory=list)
     matched_downweight_keywords: list[str] = field(default_factory=list)
 
     @property
@@ -113,6 +130,7 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
         f"{it.title or ''} {it.content or ''}" for it in items
     ).lower()
     policy = _count_keyword_hits(combined, POLICY_IMPACT_KEYWORDS)
+    ground_reality = _count_keyword_hits(combined, GROUND_REALITY_KEYWORDS)
     downweight = _count_keyword_hits(combined, DOWNWEIGHT_KEYWORDS)
 
     timestamps = [_as_utc(it.timestamp) for it in items if it.timestamp is not None]
@@ -128,9 +146,11 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
         has_tier2=has_tier2,
         signal_only=signal_only,
         policy_impact_hits=len(policy),
+        ground_reality_hits=len(ground_reality),
         downweight_hits=len(downweight),
         recency_hours=recency_hours,
         matched_policy_keywords=policy,
+        matched_ground_reality_keywords=ground_reality,
         matched_downweight_keywords=downweight,
     )
 
@@ -148,19 +168,27 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
     """
     score = 0.0
 
-    # Primary-source anchoring — the dominant term.
+    # Primary-source anchoring. Kept as a positive signal but no longer
+    # dominant — a lone government press release should not outrank a
+    # well-corroborated cross-source ground-reality story.
     if f.has_tier1:
-        score += 4.0
+        score += 2.5
     elif f.has_tier2:
-        score += 2.0
+        score += 1.5
 
     # Independent corroboration (distinct outlets), with diminishing returns.
-    score += min(f.distinct_sources, 6) * 0.6
+    # This is the strongest signal for ground-reality events that governments
+    # do not announce but multiple wires and social feeds report.
+    score += min(f.distinct_sources, 8) * 0.9
     # Extra weight for multiple independent primary sources.
     score += min(f.tier1_sources, 4) * 0.5
+    # Same treatment for multiple independent wire sources.
+    score += min(f.tier2_sources, 4) * 0.5
 
     # Policy / legal / fiscal impact.
     score += min(f.policy_impact_hits, 5) * 0.5
+    # Ground-reality impact (protests, arrests, verdicts, resignations, etc.).
+    score += min(f.ground_reality_hits, 5) * 0.5
 
     # Recency: linear decay to zero across the window.
     score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)

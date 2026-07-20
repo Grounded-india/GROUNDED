@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     cluster_window_hours: float = Field(default=48.0, alias="CLUSTER_WINDOW_HOURS")
 
     # How many top events advance to Layer 3 per ranking run.
-    select_top_n: int = Field(default=5, alias="SELECT_TOP_N")
+    select_top_n: int = Field(default=20, alias="SELECT_TOP_N")
 
     def has_voyage_key(self) -> bool:
         key = (self.voyage_api_key or "").strip()

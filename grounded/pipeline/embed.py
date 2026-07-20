@@ -18,6 +18,7 @@ The backend is chosen by ``settings.embedding_backend`` ("auto" | "voyage" |
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol
 
 import numpy as np
@@ -30,6 +31,10 @@ log = logging.getLogger(__name__)
 EMBEDDING_DIM = 1024              # matches raw_items.embedding VECTOR(1024)
 _EMBED_INPUT_CHARS = 2000        # truncate long content before embedding
 _VOYAGE_MAX_BATCH = 128
+# Voyage free tier without a payment method allows only 3 RPM. Sleeping ~21s
+# between consecutive API calls keeps us safely under that. Set to 0 once a
+# payment method is on file to unlock the standard rate limits.
+_VOYAGE_BATCH_SLEEP_SECONDS = 21.0
 
 
 def build_embed_text(title: str | None, content: str) -> str:
@@ -107,6 +112,8 @@ class VoyageBackend:
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
         for i in range(0, len(texts), _VOYAGE_MAX_BATCH):
+            if i > 0 and _VOYAGE_BATCH_SLEEP_SECONDS > 0:
+                time.sleep(_VOYAGE_BATCH_SLEEP_SECONDS)
             chunk = texts[i : i + _VOYAGE_MAX_BATCH]
             resp = self._client.embed(chunk, model=self.model, input_type="document")
             out.extend(resp.embeddings)

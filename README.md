@@ -13,10 +13,12 @@ Indian news is heavily narrative-driven. Different outlets present incompatible 
 **Grounded** is an attempt at the opposite: a system that selects stories by policy/legal impact rather than outrage, grounds every claim in primary sources (government documents, court judgments, official statistics, wire services), and — critically — is **auditable at every layer**. If a broadcast looks biased, you can trace which layer failed and see exactly which sources were consulted.
 
 **What it is not:**
+
 - Not a video/TV news channel (video adds cost and complexity without helping the core "cited facts" mission).
 - Not a "one big LLM writes a news article" pipeline (unauditable; hallucination-prone).
 
 **What it is:**
+
 - A multi-agent pipeline where each agent has one narrow job.
 - A **daily newsletter + digital newspaper** — cited articles with inline source links, a front page of top stories, section pages, an email edition.
 - A system whose importance ranker deliberately downweights outrage cycles, celebrity noise, and single-source viral claims.
@@ -26,14 +28,14 @@ Indian news is heavily narrative-driven. Different outlets present incompatible 
 
 ## Core Design Commitments
 
-| Commitment | Why |
-|---|---|
-| **Text-first: newsletter + digital newspaper** | Cited claims live naturally in text; drops video cost and complexity |
-| **Two source tiers: primary/wire = truth ground, social = topic radar** | Prevents capture by coordinated social-media campaigns |
-| **Steel-manned perspectives, not false balance** | If evidence is one-sided, say so; only 50/50 genuine policy tradeoffs |
-| **Every claim must have a citation** | The Editor agent drops uncited claims rather than softening them |
-| **English first, Hindi as phase-2 track** | Ship the English pipeline before splitting effort |
-| **Daily edition cadence** | One auto-produced daily edition (front page + section pages + email newsletter); not hourly, not real-time |
+| Commitment                                                              | Why                                                                                                        |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Text-first: newsletter + digital newspaper**                          | Cited claims live naturally in text; drops video cost and complexity                                       |
+| **Two source tiers: primary/wire = truth ground, social = topic radar** | Prevents capture by coordinated social-media campaigns                                                     |
+| **Steel-manned perspectives, not false balance**                        | If evidence is one-sided, say so; only 50/50 genuine policy tradeoffs                                      |
+| **Every claim must have a citation**                                    | The Editor agent drops uncited claims rather than softening them                                           |
+| **English first, Hindi as phase-2 track**                               | Ship the English pipeline before splitting effort                                                          |
+| **Daily edition cadence**                                               | One auto-produced daily edition (front page + section pages + email newsletter); not hourly, not real-time |
 
 ---
 
@@ -58,6 +60,7 @@ Indian news is heavily narrative-driven. Different outlets present incompatible 
 Two tiers of input; every item stored raw with `source_url`, `source_tier`, `fetched_at`, `content`. No editorial touch.
 
 **Truth ground (primary sources — high trust):**
+
 - PIB India press releases (RSS)
 - MEA, MHA, MoF, other ministry releases
 - Supreme Court + High Court judgments (Indian Kanoon)
@@ -66,6 +69,7 @@ Two tiers of input; every item stored raw with `source_url`, `source_tier`, `fet
 - Gazette notifications
 
 **Signal layer (topic radar — low trust):**
+
 - Wire services: Reuters, AP, AFP (public feeds); PTI/ANI (public feeds)
 - Google News RSS (broad topic sweep)
 - Reddit RSS: `r/india`, `r/indianews`, `r/IndiaSpeaks`, `r/geopolitics`
@@ -87,19 +91,20 @@ Two tiers of input; every item stored raw with `source_url`, `source_tier`, `fet
 
 For each event, a five-agent crew runs sequentially. Each agent has a single narrow responsibility. Every output is grounded to source URLs — if a claim can't be tied to a citation, it's dropped, not softened.
 
-| Agent | Job | Output |
-|---|---|---|
-| **Fact Extractor** | Pull verifiable claims from raw source material | `[{claim, source_urls[]}]` |
-| **Primary Source Verifier** | Cross-check each claim against official docs; flag anything only reported by one wire | Verified + flagged claims |
-| **Context Agent** | Add historical / policy background — *why this matters, what led here* | Context section with citations |
-| **Perspective Agent** | Identify real debate sides, steel-man each. If evidence is overwhelming, say so; if it's a genuine tradeoff, present both at real weight | Debate section |
-| **Editor / Hallucination Auditor** | Final pass against source material; any unsupported claim is cut | Approved story package or rejection |
+| Agent                              | Job                                                                                                                                      | Output                              |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| **Fact Extractor**                 | Pull verifiable claims from raw source material                                                                                          | `[{claim, source_urls[]}]`          |
+| **Primary Source Verifier**        | Cross-check each claim against official docs; flag anything only reported by one wire                                                    | Verified + flagged claims           |
+| **Context Agent**                  | Add historical / policy background — _why this matters, what led here_                                                                   | Context section with citations      |
+| **Perspective Agent**              | Identify real debate sides, steel-man each. If evidence is overwhelming, say so; if it's a genuine tradeoff, present both at real weight | Debate section                      |
+| **Editor / Hallucination Auditor** | Final pass against source material; any unsupported claim is cut                                                                         | Approved story package or rejection |
 
 Auditability is the whole point: if a broadcast looks wrong, you can trace **which layer** failed.
 
 ### 4. Article + Edition Assembly
 
 Takes each approved story package → generates the article, then bundles the day's articles into a daily edition:
+
 - **Article** — headline, dek, body in markdown; every claim keyed to a citation index; explicit "what's contested" section where relevant; inline source links
 - **Daily edition** — front page (top ~5 stories) + section pages (Politics / Economy / Courts / Policy)
 - **Newsletter export** — same edition rendered as an email-safe HTML digest
@@ -115,17 +120,18 @@ Takes each approved story package → generates the article, then bundles the da
 
 ## Tech Stack
 
-| Layer | Choice | Reason |
-|---|---|---|
-| Backend / agents / ingest | **Python** | Best ecosystem for ingestion, embeddings, agent orchestration |
-| Agent LLM | **Claude (Anthropic SDK)** — Sonnet 4.6 for reasoning, Haiku 4.5 for extraction | Cost/quality balance, strong at citation-grounded output |
-| Database | **Postgres + pgvector** | Raw items, events, stories, claims, sources; pgvector for clustering |
-| Frontend (phase 2) | **Next.js (App Router)** | Digital newspaper site |
-| Email delivery (phase 2) | **Resend** or **Buttondown** | Simple transactional/newsletter APIs |
-| Orchestration | **cron + Postgres queue** for v1 | Simple; Prefect later if we outgrow it |
-| Deploy | **Railway** or **Fly.io** (Python + Postgres) | Cheap, sane defaults |
+| Layer                     | Choice                                                                          | Reason                                                               |
+| ------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Backend / agents / ingest | **Python**                                                                      | Best ecosystem for ingestion, embeddings, agent orchestration        |
+| Agent LLM                 | **Claude (Anthropic SDK)** — Sonnet 4.6 for reasoning, Haiku 4.5 for extraction | Cost/quality balance, strong at citation-grounded output             |
+| Database                  | **Postgres + pgvector**                                                         | Raw items, events, stories, claims, sources; pgvector for clustering |
+| Frontend (phase 2)        | **Next.js (App Router)**                                                        | Digital newspaper site                                               |
+| Email delivery (phase 2)  | **Resend** or **Buttondown**                                                    | Simple transactional/newsletter APIs                                 |
+| Orchestration             | **cron + Postgres queue** for v1                                                | Simple; Prefect later if we outgrow it                               |
+| Deploy                    | **Railway** or **Fly.io** (Python + Postgres)                                   | Cheap, sane defaults                                                 |
 
 **Budget expectation** (daily edition, ~5 stories/day):
+
 - LLM: ~$3–10/day (agent chain across 5 stories)
 - Everything else: negligible for v1
 - **Total: ~$50–150/month during regular operation**
@@ -137,6 +143,7 @@ Takes each approved story package → generates the article, then bundles the da
 ### Phase 0 — Layers 1–3 working end-to-end (current focus)
 
 Prove the core pipeline on real data, output as markdown (no site yet).
+
 - **Layer 1**: ingest workers for PIB (primary) + a wire feed + Reddit RSS (signal), storing raw items to Postgres
 - **Layer 2**: embed items, cluster into events, importance-rank
 - **Layer 3**: run the 5-agent crew (Fact Extractor → Primary Verifier → Context → Perspective → Editor) on top events
@@ -161,52 +168,49 @@ Prove the core pipeline on real data, output as markdown (no site yet).
 
 ---
 
-## Repository Layout
+## Repository Layout (v1 skeleton)
 
 ```
-grounded/                           # Python package (Layers 1–3)
-  __init__.py
-  cli.py                            # `grounded` command entry point
-  config.py                         # Env / settings loading
-  db.py                             # Postgres connection + query helpers
-  models.py                         # Pydantic models: RawItem, Event, Story, Claim
+apps/site/                          # Next.js website
+  app/broadcast/[date]/page.tsx     # Daily broadcast landing
+  app/story/[id]/page.tsx           # Story: video + article + sources
+  app/archive/page.tsx              # Historical broadcasts
+  remotion/
+    NewsStory.tsx                   # Video composition template
+    CitationCard.tsx                # On-screen source card
+    LowerThird.tsx                  # Source URL overlay
 
-  ingest/                           # Layer 1
-    __init__.py
-    base.py                         # Shared fetch + dedup + store utilities
-    pib.py                          # PIB India press releases (primary)
-    reuters.py                      # Reuters India (wire)
-    reddit.py                       # Reddit RSS: r/india, r/indianews, etc.
-    # (more sources added incrementally)
+services/ingest/                    # Python
+  wires.py                          # Reuters/AP/AFP/PTI fetchers
+  primary.py                        # PIB, ministry, court fetchers
+  social.py                         # Reddit RSS, Nitter, YouTube captions
+  base.py                           # Shared fetch + storage utilities
 
-  pipeline/                         # Layer 2
-    __init__.py
-    embed.py                        # Generate embeddings for raw items
-    clustering.py                   # Cluster items into events
-    importance.py                   # Score + rank events
+services/agents/
+  fact_extractor.py
+  primary_verifier.py
+  context_agent.py
+  perspective_agent.py
+  editor.py
+  base.py                           # Shared prompting + citation-check utils
 
-  agents/                           # Layer 3
-    __init__.py
-    base.py                         # Shared prompting + citation-check utils
-    fact_extractor.py
-    primary_verifier.py
-    context_agent.py
-    perspective_agent.py
-    editor.py
-    crew.py                         # Sequential agent runner for one event
+services/pipeline/
+  clustering.py                     # Embed + cluster raw items into events
+  importance.py                     # Score + rank events
+  scriptwriter.py                   # Story package → script + article
+  produce.py                        # Script → TTS → Remotion render
+  publish.py                        # Push finished story to site + DB
 
 db/
-  schema.sql                        # raw_items, events, stories, claims, ...
-  migrations/                       # Future schema changes
+  schema.sql                        # raw_items, events, stories, claims,
+                                    # sources, broadcasts, corrections
 
 infra/
-  docker-compose.yml                # Local dev: postgres + pgvector
+  docker-compose.yml                # Local dev: postgres + redis + workers
+  workers.Procfile                  # Deploy definition for Railway/Fly
 
-apps/site/                          # Next.js digital newspaper (Phase 1)
-  # deferred until Layers 1–3 are working
-
-pyproject.toml
-.env.example                        # ANTHROPIC_API_KEY, DATABASE_URL
+.env.example                        # ANTHROPIC_API_KEY, ELEVENLABS_API_KEY,
+                                    # DATABASE_URL, R2_*, etc.
 ```
 
 ---
@@ -235,5 +239,6 @@ pyproject.toml
 ## Status
 
 Pre-code. Architecture and phase plan agreed. Deciding between:
+
 1. **Phase 0 first** — get one manually-picked story through the full pipeline for a fast "wow it works" moment.
 2. **Scaffold first** — set up the repo, database, and Next.js site so the pipeline has a home to grow into.

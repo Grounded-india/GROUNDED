@@ -181,13 +181,28 @@ def cmd_rank(top_n: int | None) -> None:
     )
 
 
+@cli.command("scrape")
+@click.option("--force", is_flag=True, help="Re-scrape items even if full_content is already set.")
+def cmd_scrape(force: bool) -> None:
+    """Layer 2.5: fetch full article body for items in selected events."""
+    from grounded.pipeline.scrape import scrape_selected_events
+
+    result = scrape_selected_events(force=force)
+    click.echo(
+        f"Scraped {result['scraped']} item(s), {result['empty']} empty, "
+        f"{result['failed']} failed (of {result['pending']} pending)."
+    )
+
+
 @cli.command("pipeline")
 @click.option("--top", "top_n", default=None, type=int, help="How many events to select.")
-def cmd_pipeline(top_n: int | None) -> None:
-    """Layer 2: run embed -> cluster -> rank in one go."""
+@click.option("--skip-scrape", is_flag=True, help="Do not fetch full article bodies at the end.")
+def cmd_pipeline(top_n: int | None, skip_scrape: bool) -> None:
+    """Layer 2: run embed -> cluster -> rank -> scrape in one go."""
     from grounded.pipeline.clustering import build_events
     from grounded.pipeline.embed import embed_pending
     from grounded.pipeline.importance import rank_events
+    from grounded.pipeline.scrape import scrape_selected_events
 
     embedded = embed_pending()
     click.echo(f"Embedded {embedded} item(s).")
@@ -197,6 +212,14 @@ def cmd_pipeline(top_n: int | None) -> None:
     click.echo(
         f"Scored {result['scored']} event(s), selected {result['selected']}, "
         f"demoted {result['demoted']}."
+    )
+    if skip_scrape:
+        return
+    scrape_result = scrape_selected_events()
+    click.echo(
+        f"Scraped {scrape_result['scraped']} item(s), "
+        f"{scrape_result['empty']} empty, {scrape_result['failed']} failed "
+        f"(of {scrape_result['pending']} pending)."
     )
 
 
