@@ -64,6 +64,12 @@ def strip_boilerplate(text: str) -> str:
         return text
     kept_lines: list[str] = []
     for line in text.splitlines():
+        # Preserve blank lines as paragraph separators so multi-turn debate
+        # output does not get glued into one wall of text.
+        if not line.strip():
+            if kept_lines and kept_lines[-1] != "":
+                kept_lines.append("")
+            continue
         parts = _SENTENCE_SPLIT.split(line)
         kept = [p for p in parts if p.strip() and not is_boilerplate(p)]
         if not kept:

@@ -95,8 +95,15 @@ def _llm_cut(
             system=_AUDIT_SYSTEM, user=user, max_tokens=400, temperature=0.0, json_mode=True
         )
     )
-    contradicted = {int(x) for x in (data.get("contradicted") or [])}
-    unsupported = {int(x) for x in (data.get("unsupported") or [])}
+    # Gemini sometimes returns just a JSON list at the top level instead of the
+    # requested {"contradicted": [...], "unsupported": [...]} object. Treat a
+    # bare list as "these indices are contradicted; nothing extra unsupported".
+    if isinstance(data, list):
+        data = {"contradicted": data, "unsupported": []}
+    elif not isinstance(data, dict):
+        data = {"contradicted": [], "unsupported": []}
+    contradicted = {int(x) for x in (data.get("contradicted") or []) if str(x).lstrip("-").isdigit()}
+    unsupported = {int(x) for x in (data.get("unsupported") or []) if str(x).lstrip("-").isdigit()}
 
     n = len(claims)
     # Contradictions / half-truths: always cut, incl. primary sources and lone

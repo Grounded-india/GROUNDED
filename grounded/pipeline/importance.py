@@ -74,6 +74,29 @@ GROUND_REALITY_KEYWORDS: tuple[str, ...] = (
     "explosion", "attack", "assault", "raid", "seized",
 )
 
+# India-relevance signal. The whole product is India-focused, so this is a
+# large lever applied as a SWING (positive if the event is about India,
+# negative if it clearly is not). Matched case-insensitively as substrings
+# of title+content. If your ingest fans out globally later, tune weights.
+INDIA_KEYWORDS: tuple[str, ...] = (
+    "india", "indian", "bharat", "hindustan",
+    "delhi", "new delhi", "mumbai", "bengaluru", "bangalore", "chennai",
+    "kolkata", "hyderabad", "pune", "ahmedabad", "lucknow", "jaipur",
+    "modi", "narendra modi", "rahul gandhi", "amit shah", "kejriwal",
+    "yogi", "mamata", "stalin", "sonia gandhi", "priyanka gandhi",
+    "parliament", "lok sabha", "rajya sabha", "sansad", "monsoon session",
+    "bjp", "congress", "aap", "tmc", "dmk", "aiadmk", "shiv sena", "ncp",
+    "supreme court of india", "high court", "cji", "chief justice of india",
+    "rbi", "reserve bank of india", "sebi", "pib", "prs india",
+    "niti aayog", "aadhaar", "gst", "cbi", " ed ", "nia", "cag",
+    "kashmir", "ladakh", "manipur", "punjab", "tamil nadu", "karnataka",
+    "kerala", "maharashtra", "gujarat", "uttar pradesh", "bihar",
+    "west bengal", "odisha", "assam", "andhra pradesh", "telangana",
+    "rajasthan", "madhya pradesh", "haryana", "himachal", "uttarakhand",
+    "jharkhand", "chhattisgarh", "goa", "sikkim", "nagaland", "meghalaya",
+    "arunachal pradesh", "tripura", "mizoram",
+)
+
 
 @dataclass
 class ItemView:
@@ -97,10 +120,12 @@ class EventFeatures:
     signal_only: bool
     policy_impact_hits: int
     ground_reality_hits: int
+    india_hits: int
     downweight_hits: int
     recency_hours: float
     matched_policy_keywords: list[str] = field(default_factory=list)
     matched_ground_reality_keywords: list[str] = field(default_factory=list)
+    matched_india_keywords: list[str] = field(default_factory=list)
     matched_downweight_keywords: list[str] = field(default_factory=list)
 
     @property
@@ -131,6 +156,7 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
     ).lower()
     policy = _count_keyword_hits(combined, POLICY_IMPACT_KEYWORDS)
     ground_reality = _count_keyword_hits(combined, GROUND_REALITY_KEYWORDS)
+    india = _count_keyword_hits(combined, INDIA_KEYWORDS)
     downweight = _count_keyword_hits(combined, DOWNWEIGHT_KEYWORDS)
 
     timestamps = [_as_utc(it.timestamp) for it in items if it.timestamp is not None]
@@ -147,10 +173,12 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
         signal_only=signal_only,
         policy_impact_hits=len(policy),
         ground_reality_hits=len(ground_reality),
+        india_hits=len(india),
         downweight_hits=len(downweight),
         recency_hours=recency_hours,
         matched_policy_keywords=policy,
         matched_ground_reality_keywords=ground_reality,
+        matched_india_keywords=india,
         matched_downweight_keywords=downweight,
     )
 
@@ -189,6 +217,17 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
     score += min(f.policy_impact_hits, 5) * 0.5
     # Ground-reality impact (protests, arrests, verdicts, resignations, etc.).
     score += min(f.ground_reality_hits, 5) * 0.5
+
+    # India relevance — the whole product is India-focused. This is a large
+    # lever comparable to tier-1 anchoring, applied as a SWING not a bonus:
+    #   >= 3 India mentions → strong positive
+    #   0 India mentions   → strong negative
+    # A story with zero India mentions has to be extraordinarily well-
+    # corroborated to stay in the top selection.
+    if f.india_hits >= 3:
+        score += 3.0
+    elif f.india_hits == 0:
+        score -= 4.0
 
     # Recency: linear decay to zero across the window.
     score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)

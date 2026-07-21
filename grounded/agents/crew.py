@@ -6,9 +6,16 @@ offline fallback. Every stage is recorded in ``agent_trace`` (including which
 model ran it and the story mode) so a finished story can be audited end to end.
 
 Story mode:
-  * ``report`` - the event has a primary/official source; standard write-up.
-  * ``debate`` - no primary source (ground-reality, e.g. Reddit); the event is
-    presented as a two-sided, fact-grounded debate instead of being dropped.
+  * ``report`` - the event is a straightforward reporting of facts; no evident
+    opposing sides in the source material.
+  * ``debate`` - the source material contains explicit opposition, criticism,
+    contest, allegation, or dispute keywords; the event is presented as a
+    fact-grounded back-and-forth debate.
+
+Mode selection is driven by CONTROVERSY signals in the source content, not by
+presence/absence of a primary source. A sports final has no debate. A Cabinet
+approval with opposition rebuttal has one. That difference matters more to the
+reader than whether PIB has covered it.
 """
 
 from __future__ import annotations
@@ -24,6 +31,35 @@ from grounded.agents.schemas import EventView, SourceDoc, StoryPackage
 from grounded.agents.verifier import verify_claims
 
 log = logging.getLogger(__name__)
+
+
+# Keywords that indicate genuine controversy / opposition / dispute in the
+# source material. When any of these appears, the story is presented as a
+# debate instead of a plain report. Matched case-insensitively as substrings
+# of title+content across all docs for the event.
+CONTROVERSY_KEYWORDS: tuple[str, ...] = (
+    "opposition", "opposed", "opponent", "rival",
+    "critic", "critics", "criticise", "criticised", "criticize", "criticized",
+    "criticism", "denounced", "denounce", "condemned", "condemn",
+    "accuse", "accused", "accusation", "allegation", "alleged",
+    "deny", "denies", "denied", "denial",
+    "reject", "rejected", "rejection", "reject the",
+    "controversial", "contested", "contest", "dispute", "disputed",
+    "backlash", "outrage", "protest", "protests", "protested",
+    "hypocrisy", "hypocritical", "hypocrite",
+    "u-turn", "flip flop", "flip-flop",
+    "contradict", "contradicts", "contradicted", "contradictory",
+    "clash", "row", "spat", "war of words", "slam", "slammed",
+    "scandal", "cover up", "cover-up",
+    "resign", "resignation", "sacked", "dismissed",
+    "walkout", "boycott", "no confidence",
+)
+
+
+def _count_controversy_hits(docs: list[SourceDoc]) -> int:
+    """Count distinct controversy keywords present across all docs."""
+    blob = " \n ".join(f"{d.title or ''} {d.text or ''}" for d in docs).lower()
+    return sum(1 for kw in CONTROVERSY_KEYWORDS if kw in blob)
 
 
 def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryPackage:
@@ -45,10 +81,11 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
     ed_be = router.for_role("editor")
 
     has_primary = any(d.is_primary for d in docs)
-    mode = "report" if has_primary else "debate"
+    controversy_hits = _count_controversy_hits(docs)
+    mode = "debate" if controversy_hits >= 1 else "report"
     log.info(
-        "event %s: building %s-mode story from %d source(s) [%s]",
-        event.id, mode, len(docs), (event.title or "")[:60],
+        "event %s: building %s-mode story from %d source(s) [primary=%s, controversy_hits=%d] [%s]",
+        event.id, mode, len(docs), has_primary, controversy_hits, (event.title or "")[:60],
     )
 
     log.info("  [1/5] fact extractor (%s)...", ex_be.name)
@@ -71,6 +108,8 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
 
     package.agent_trace = {
         "mode": mode,
+        "has_primary": has_primary,
+        "controversy_hits": controversy_hits,
         "models": router.summary(),
         "n_sources": len(docs),
         "fact_extractor": {

@@ -82,6 +82,23 @@ def _fetch(approved_only: bool) -> list[dict]:
                 (s["id"],),
             )
             s["claims"] = cur.fetchall()
+
+            # Signal-tier (Reddit / social) items that were in this event's
+            # cluster. We do not treat these as fact, but their presence is
+            # itself worth surfacing: it tells the reader the story was also
+            # being discussed on social media.
+            cur.execute(
+                """
+                SELECT r.source_name, COUNT(*) AS n
+                FROM raw_items r
+                JOIN event_items ei ON ei.raw_item_id = r.id
+                WHERE ei.event_id = %s AND r.source_tier = 3
+                GROUP BY r.source_name
+                ORDER BY r.source_name
+                """,
+                (s["event_id"],),
+            )
+            s["signal_items"] = cur.fetchall()
     return stories
 
 
@@ -134,6 +151,25 @@ def _render_story(i: int, s: dict) -> list[str]:
     outlets = _story_outlets(s)
     if outlets:
         lines += [f"**Sources:** {', '.join(outlets)}", ""]
+
+    # Public-discussion footer: signal-tier items (Reddit + broad Google News)
+    # that were in this event's cluster. Not cited as fact; presence only,
+    # so the reader can see the story was being discussed beyond the wires.
+    signal_items = s.get("signal_items") or []
+    # Only surface Reddit-style social sources here (not the broad Google News
+    # aggregator, which is just topic radar). Reddit source names begin "reddit_".
+    reddit_rows = [r for r in signal_items if (r["source_name"] or "").startswith("reddit")]
+    if reddit_rows:
+        total = sum(r["n"] for r in reddit_rows)
+        subs = ", ".join(
+            f"r/{r['source_name'].removeprefix('reddit_')}" for r in reddit_rows
+        )
+        noun = "post" if total == 1 else "posts"
+        lines += [
+            f"*Public discussion: {total} Reddit {noun} in this event's cluster "
+            f"({subs}) — surfaced as signal, not cited as fact.*",
+            "",
+        ]
     return lines
 
 
@@ -168,9 +204,10 @@ def render_edition(approved_only: bool = True) -> str:
         "---",
         "",
         "*Every claim above was extracted from source material, verified against "
-        "its citations, and audited for hallucination. Items marked DEBATE lack a "
-        "primary/official source and are presented as contested rather than "
-        "confirmed.*",
+        "its citations, and audited for hallucination. Items marked DEBATE are "
+        "stories where the sources themselves show opposition, criticism or "
+        "contest — presented as an actual back-and-forth debate, with each side "
+        "arguing only from what the sources support.*",
         "",
     ]
     return "\n".join(out).strip() + "\n"

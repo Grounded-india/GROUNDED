@@ -144,6 +144,7 @@ class OpenAICompatibleBackend:
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         system_prefix: str = "",
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         from openai import OpenAI
 
@@ -153,6 +154,11 @@ class OpenAICompatibleBackend:
         # ("detailed thinking off") so it returns clean JSON fast instead of
         # emitting a long <think> block that blows the timeout.
         self.system_prefix = system_prefix
+        # Provider-specific params forwarded to chat.completions.create via
+        # extra_body. Used by NVIDIA Nemotron 3 reasoning variants (550B, 340B,
+        # 120B) which read {"chat_template_kwargs": {"enable_thinking": bool}}
+        # and {"reasoning_budget": int}. Older models ignore unknown fields.
+        self.extra_body = extra_body or None
         self._client = OpenAI(
             base_url=base_url,
             api_key=api_key,
@@ -178,6 +184,8 @@ class OpenAICompatibleBackend:
         kwargs: dict[str, Any] = {}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=[
@@ -222,22 +230,46 @@ def _timeout() -> float:
 
 
 def make_nemotron() -> LLMBackend | None:
-    """NVIDIA NIM (Nemotron) backend, or None if no key is configured."""
+    """NVIDIA NIM (Nemotron) backend, or None if no key is configured.
+
+    Reasoning control (Nemotron models reason by default, which is slow and eats
+    output tokens):
+
+    * ``NEMOTRON_THINKING=on``  -> allow reasoning, budget = NEMOTRON_REASONING_BUDGET
+      (default 8192). Best debate quality, ~2-4x wall clock per call.
+    * default / ``off``         -> disable reasoning. Fast, clean answers.
+
+    Two mechanisms are set simultaneously so the switch works across model
+    families:
+      - ``system_prefix="detailed thinking off\\n"`` for the 49B ``super`` model
+        (text-prompt convention).
+      - ``extra_body={"chat_template_kwargs":{"enable_thinking": bool}, ...}``
+        for Nemotron 3 reasoning variants (550B, 340B, 120B).
+    """
     key = env_value("NVIDIA_API_KEY")
     if not _has_real_key(key):
         return None
     model = env_value("NEMOTRON_MODEL") or DEFAULT_NEMOTRON_MODEL
+    thinking_on = env_value("NEMOTRON_THINKING").lower() == "on"
+    try:
+        reasoning_budget = int(env_value("NEMOTRON_REASONING_BUDGET") or 8192)
+    except ValueError:
+        reasoning_budget = 8192
+
+    extra_body: dict[str, Any] = {
+        "chat_template_kwargs": {"enable_thinking": thinking_on},
+    }
+    if thinking_on:
+        extra_body["reasoning_budget"] = reasoning_budget
+
     return OpenAICompatibleBackend(
         name="nemotron",
         base_url=NEMOTRON_BASE_URL,
         api_key=key,
         model=model,
         timeout=_timeout(),
-        # Nemotron-super reasons by default and emits a slow <think> block; turn it
-        # off for fast, clean JSON. Override by setting NEMOTRON_THINKING=on.
-        system_prefix=""
-        if env_value("NEMOTRON_THINKING").lower() == "on"
-        else "detailed thinking off\n",
+        system_prefix="" if thinking_on else "detailed thinking off\n",
+        extra_body=extra_body,
     )
 
 

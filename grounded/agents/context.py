@@ -9,6 +9,7 @@ sourcing so the pipeline still yields a usable section offline.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 
 from grounded.agents.llm import LLMBackend
 from grounded.agents.schemas import EventView, SourceDoc, VerifiedClaim
@@ -16,8 +17,19 @@ from grounded.agents.schemas import EventView, SourceDoc, VerifiedClaim
 SYSTEM = (
     "You are a news context writer. Using only the provided claims and sources, "
     "write 2-4 sentences of neutral background explaining why this event matters "
-    "and what led to it. Do not introduce facts that are not in the sources."
+    "and what led to it. Do not introduce facts that are not in the sources.\n"
+    "\n"
+    "Time awareness: the current date is stated as 'TODAY IS ...' in the user "
+    "prompt. Where it reads more naturally, use relative time markers "
+    "(yesterday, today, two days ago, earlier this week) alongside the specific "
+    "dates that appear in the sources. Do not invent dates the sources do not "
+    "give you."
 )
+
+
+def _today_line() -> str:
+    now = datetime.now().astimezone()
+    return f"TODAY IS {now:%A, %d %B %Y}."
 
 
 def build_prompt(
@@ -26,6 +38,7 @@ def build_prompt(
     claim_lines = "\n".join(f"- {c.text}" for c in claims if c.verified) or "- (none)"
     source_names = ", ".join(sorted({d.source_name for d in docs}))
     return (
+        f"{_today_line()}\n\n"
         f"EVENT: {event.title}\n\n"
         f"VERIFIED CLAIMS:\n{claim_lines}\n\n"
         f"SOURCES: {source_names}\n\n"
