@@ -29,8 +29,26 @@ DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 # client class drives both - only base_url / key / model differ.
 NEMOTRON_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# The 49B "super" reliably follows the "respond only with JSON" instruction and
+# produces clean, parseable output. Smaller/faster nano models (e.g.
+# nemotron-3-nano-30b) ignore JSON mode on complex prompts and emit reasoning
+# prose + numbered lists instead, which cannot be parsed - so we default to super
+# for correctness. It is slower (~80-130s/call on the free tier); json_mode keeps
+# it from rambling to the token cap. Override with NEMOTRON_MODEL if you have a
+# faster endpoint or want to trade quality for speed.
 DEFAULT_NEMOTRON_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+# NOTE: gemini-2.5-flash is retired for new API keys (returns 404). The *-lite
+# aliases are the reliably-callable, current flash tier on the free plan. Bump to
+# gemini-flash-latest / gemini-2.5-pro via GEMINI_MODEL if your quota allows it.
+DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest"
+
+# Per-request wall-clock cap so a slow/hung provider can't freeze a run forever.
+# The super model's fact-extraction call legitimately takes ~135s on the free
+# tier, so this sits comfortably above that to avoid aborting real work; a truly
+# hung request still aborts here and the SDK retries (with backoff) to ride out
+# transient 429/503/5xx blips. Override via LLM_TIMEOUT.
+DEFAULT_TIMEOUT = 240.0
+DEFAULT_MAX_RETRIES = 4
 
 
 @runtime_checkable
@@ -39,7 +57,13 @@ class LLMBackend(Protocol):
     is_local: bool
 
     def complete(
-        self, *, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+        json_mode: bool = False,
     ) -> str: ...
 
 
@@ -51,7 +75,13 @@ class LocalBackend:
     is_local = True
 
     def complete(
-        self, *, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+        json_mode: bool = False,
     ) -> str:
         raise RuntimeError(
             "LocalBackend.complete() should never be called - agents must branch "
@@ -72,8 +102,16 @@ class AnthropicBackend:
         self.model = model or os.environ.get("GROUNDED_LLM_MODEL", DEFAULT_MODEL)
 
     def complete(
-        self, *, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+        json_mode: bool = False,
     ) -> str:
+        # Anthropic has no response_format flag; json_mode is a no-op here (the
+        # default router does not use this backend).
         resp = self._client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -96,16 +134,50 @@ class OpenAICompatibleBackend:
 
     is_local = False
 
-    def __init__(self, *, name: str, base_url: str, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        system_prefix: str = "",
+    ) -> None:
         from openai import OpenAI
 
         self.name = name
         self.model = model
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        # Prepended to every system prompt. Used to switch Nemotron reasoning off
+        # ("detailed thinking off") so it returns clean JSON fast instead of
+        # emitting a long <think> block that blows the timeout.
+        self.system_prefix = system_prefix
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
 
     def complete(
-        self, *, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+        json_mode: bool = False,
     ) -> str:
+        if self.system_prefix:
+            system = f"{self.system_prefix}{system}"
+        # JSON mode forces valid, self-terminating JSON: the model stops when the
+        # object closes instead of rambling to the token cap (which produced
+        # truncated / half-prose output on small models). Only pass it when the
+        # caller actually expects JSON.
+        kwargs: dict[str, Any] = {}
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=[
@@ -114,6 +186,7 @@ class OpenAICompatibleBackend:
             ],
             max_tokens=max_tokens,
             temperature=temperature,
+            **kwargs,
         )
         return (resp.choices[0].message.content or "").strip()
 
@@ -141,6 +214,13 @@ def env_value(name: str) -> str:
         return ""
 
 
+def _timeout() -> float:
+    try:
+        return float(env_value("LLM_TIMEOUT") or DEFAULT_TIMEOUT)
+    except ValueError:
+        return DEFAULT_TIMEOUT
+
+
 def make_nemotron() -> LLMBackend | None:
     """NVIDIA NIM (Nemotron) backend, or None if no key is configured."""
     key = env_value("NVIDIA_API_KEY")
@@ -148,7 +228,16 @@ def make_nemotron() -> LLMBackend | None:
         return None
     model = env_value("NEMOTRON_MODEL") or DEFAULT_NEMOTRON_MODEL
     return OpenAICompatibleBackend(
-        name="nemotron", base_url=NEMOTRON_BASE_URL, api_key=key, model=model
+        name="nemotron",
+        base_url=NEMOTRON_BASE_URL,
+        api_key=key,
+        model=model,
+        timeout=_timeout(),
+        # Nemotron-super reasons by default and emits a slow <think> block; turn it
+        # off for fast, clean JSON. Override by setting NEMOTRON_THINKING=on.
+        system_prefix=""
+        if env_value("NEMOTRON_THINKING").lower() == "on"
+        else "detailed thinking off\n",
     )
 
 
@@ -159,7 +248,7 @@ def make_gemini() -> LLMBackend | None:
         return None
     model = env_value("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
     return OpenAICompatibleBackend(
-        name="gemini", base_url=GEMINI_BASE_URL, api_key=key, model=model
+        name="gemini", base_url=GEMINI_BASE_URL, api_key=key, model=model, timeout=_timeout()
     )
 
 
@@ -187,16 +276,27 @@ def get_backend(prefer: str | None = None) -> LLMBackend:
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+# Reasoning models (e.g. Nemotron-super) can wrap their answer in <think>...</think>
+# whose free text may contain stray braces that confuse a brace-matching scan.
+# Strip any such block (including an unterminated one) before looking for JSON.
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"<think\b[^>]*>.*", re.DOTALL | re.IGNORECASE)
 
 
 def extract_json(text: str) -> Any:
     """Pull the first JSON value out of an LLM response.
 
-    Tolerates markdown code fences and surrounding prose, which models emit even
-    when told not to. Raises ``ValueError`` if nothing parseable is found.
+    Tolerates markdown code fences, reasoning-model <think> blocks, and
+    surrounding prose, which models emit even when told not to. Raises
+    ``ValueError`` if nothing parseable is found.
     """
     if not text or not text.strip():
         raise ValueError("empty LLM response")
+
+    text = _THINK_BLOCK.sub("", text)
+    text = _THINK_OPEN.sub("", text)  # drop a dangling, unclosed <think> too
+    if not text.strip():
+        raise ValueError("LLM response was only a reasoning block, no JSON")
 
     fenced = _JSON_FENCE.search(text)
     candidate = fenced.group(1).strip() if fenced else text.strip()

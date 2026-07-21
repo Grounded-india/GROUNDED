@@ -7,6 +7,7 @@ subcommand can delegate here.
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 import click
@@ -14,9 +15,23 @@ import click
 from grounded.agents.runner import build_stories
 
 
+def _setup_logging() -> None:
+    from grounded.config import settings
+
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("psycopg.pool").setLevel(logging.ERROR)
+    # httpx logs one line per LLM request; keep it so slow calls are visible.
+    logging.getLogger("httpx").setLevel(logging.INFO)
+
+
 @click.group()
 def cli() -> None:
     """Layer 3 - multi-agent story building."""
+    _setup_logging()
 
 
 @cli.command("build")

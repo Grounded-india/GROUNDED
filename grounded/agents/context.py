@@ -54,10 +54,10 @@ def build_context(
 ) -> str:
     if backend.is_local:
         return _local_context(event, docs)
-    text = backend.complete(
+    # Real backend: use it or fail loudly - no silent local substitution.
+    return backend.complete(
         system=SYSTEM,
         user=build_prompt(event, claims, docs),
         max_tokens=600,
         temperature=0.3,
-    )
-    return text.strip() or _local_context(event, docs)
+    ).strip()

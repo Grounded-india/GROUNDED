@@ -75,6 +75,7 @@ def _frame_sides(event: EventView, facts: str, backend: LLMBackend) -> tuple[str
         ),
         max_tokens=200,
         temperature=0.2,
+        json_mode=True,
     )
     try:
         data = extract_json(raw)
@@ -136,6 +137,7 @@ def run_debate(
     if backend.is_local:
         return _local_debate(event, claims, docs)
 
+    # Real backend: use it or fail loudly - no silent local substitution.
     facts = _facts_block(claims, docs)
     label_a, label_b = _frame_sides(event, facts, backend)
     side_a = _argue(label_a, event, facts, backend) or "(no argument produced)"

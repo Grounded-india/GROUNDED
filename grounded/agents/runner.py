@@ -29,8 +29,13 @@ def build_stories(
     router = as_router(backend)
     work = load_events_needing_stories(force=force, limit=limit, event_id=event_id)
 
+    models = ", ".join(f"{r}={n}" for r, n in router.summary().items())
+    log.info("model routing: %s", models)
+    log.info("processing %d candidate event(s)", len(work))
+
     built = approved = rejected = skipped = debates = 0
-    for event, docs in work:
+    for idx, (event, docs) in enumerate(work, start=1):
+        log.info("=== event %d/%d ===", idx, len(work))
         if not docs:
             log.warning("event %s has no sources; skipping", event.id)
             skipped += 1

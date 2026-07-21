@@ -91,7 +91,7 @@ class _FakeBackend:
         self._responses = list(responses)
         self.calls = []
 
-    def complete(self, *, system, user, max_tokens=1500, temperature=0.2):
+    def complete(self, *, system, user, max_tokens=1500, temperature=0.2, json_mode=False):
         self.calls.append(user)
         return self._responses.pop(0) if self._responses else "{}"
 

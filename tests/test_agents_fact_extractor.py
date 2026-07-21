@@ -52,6 +52,25 @@ def test_parse_response_drops_empty_text():
     assert parse_response(raw, valid_ids={ID_A}) == []
 
 
+def test_parse_response_salvages_truncated_json():
+    # model was cut off mid-array (finish_reason=length): keep the complete objects
+    raw = (
+        '{"claims": ['
+        f'{{"text": "first complete claim", "source_ids": ["{ID_A}"]}},'
+        f'{{"text": "second complete claim", "source_ids": ["{ID_A}"]}},'
+        f'{{"text": "third truncated cla'
+    )
+    claims = parse_response(raw, valid_ids={ID_A})
+    assert [c.text for c in claims] == ["first complete claim", "second complete claim"]
+
+
+def test_parse_response_raises_when_nothing_salvageable():
+    import pytest
+
+    with pytest.raises(ValueError):
+        parse_response("total garbage no json", valid_ids={ID_A})
+
+
 def test_local_extract_is_grounded_and_deterministic():
     text = (
         "The cabinet approved the new manufacturing scheme on Monday. "

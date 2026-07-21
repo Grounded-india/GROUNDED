@@ -30,6 +30,25 @@ def test_extract_json_handles_braces_inside_strings():
     assert extract_json(raw) == {"text": "a } b { c", "n": 1}
 
 
+def test_extract_json_strips_reasoning_block():
+    # reasoning models (Nemotron) wrap the answer in <think>...</think>
+    raw = '<think>Let me consider {this} and {that}...</think>\n{"claims": [1]}'
+    assert extract_json(raw) == {"claims": [1]}
+
+
+def test_extract_json_strips_unterminated_reasoning_block():
+    # a truncated/unclosed think block with stray braces must not be parsed as JSON
+    raw = '<think>weighing options { partial'
+    with pytest.raises(ValueError):
+        extract_json(raw)
+
+
+def test_extract_json_ignores_braces_in_reasoning():
+    # braces inside the think block must not confuse the brace-matching scan
+    raw = '<think>the source says {"x": 999} but</think> {"verified": true}'
+    assert extract_json(raw) == {"verified": True}
+
+
 def test_extract_json_raises_on_empty():
     with pytest.raises(ValueError):
         extract_json("   ")

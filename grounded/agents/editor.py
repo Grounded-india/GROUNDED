@@ -89,15 +89,14 @@ def _llm_cut(
         'or assert details the source never states>], "unsupported": [<indices not '
         "clearly backed but without direct conflict>]}"
     )
-    try:
-        data = extract_json(
-            backend.complete(system=_AUDIT_SYSTEM, user=user, max_tokens=400, temperature=0.0)
+    # Real backend only (callers gate on is_local): run it or fail loudly.
+    data = extract_json(
+        backend.complete(
+            system=_AUDIT_SYSTEM, user=user, max_tokens=400, temperature=0.0, json_mode=True
         )
-        contradicted = {int(x) for x in (data.get("contradicted") or [])}
-        unsupported = {int(x) for x in (data.get("unsupported") or [])}
-    except (ValueError, TypeError, KeyError) as e:
-        log.warning("editor LLM audit failed (%s); keeping deterministic set", e)
-        return claims
+    )
+    contradicted = {int(x) for x in (data.get("contradicted") or [])}
+    unsupported = {int(x) for x in (data.get("unsupported") or [])}
 
     n = len(claims)
     # Contradictions / half-truths: always cut, incl. primary sources and lone
@@ -133,21 +132,18 @@ def _llm_headline(
     event: EventView, claims: list[VerifiedClaim], backend: LLMBackend
 ) -> tuple[str, str]:
     facts = "\n".join(f"- {c.text}" for c in claims[:6]) or f"- {event.title}"
-    try:
-        raw = backend.complete(
-            system=_HEADLINE_SYSTEM,
-            user=f"EVENT: {event.title}\nFACTS:\n{facts}\n\n"
-            'Return JSON: {"headline": "...", "dek": "..."}',
-            max_tokens=200,
-            temperature=0.3,
-        )
-        data = extract_json(raw)
-        headline = str(data.get("headline") or "").strip() or event.title
-        dek = str(data.get("dek") or "").strip()
-        return headline, dek
-    except (ValueError, TypeError, KeyError) as e:
-        log.warning("editor headline generation failed (%s); using event title", e)
-        return event.title, ""
+    raw = backend.complete(
+        system=_HEADLINE_SYSTEM,
+        user=f"EVENT: {event.title}\nFACTS:\n{facts}\n\n"
+        'Return JSON: {"headline": "...", "dek": "..."}',
+        max_tokens=200,
+        temperature=0.3,
+        json_mode=True,
+    )
+    data = extract_json(raw)
+    headline = str(data.get("headline") or "").strip() or event.title
+    dek = str(data.get("dek") or "").strip()
+    return headline, dek
 
 
 def _assemble_markdown(

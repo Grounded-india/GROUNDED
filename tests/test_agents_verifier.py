@@ -72,7 +72,7 @@ class _FakeBackend:
     def __init__(self, responses):
         self._responses = list(responses)
 
-    def complete(self, *, system, user, max_tokens=1500, temperature=0.2):
+    def complete(self, *, system, user, max_tokens=1500, temperature=0.2, json_mode=False):
         return self._responses.pop(0) if self._responses else "{}"
 
 

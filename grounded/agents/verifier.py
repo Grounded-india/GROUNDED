@@ -113,16 +113,14 @@ def _semantic_demote(
         'or assert details the source never states>], "unsupported": [<indices the '
         "source does not clearly support but does not directly conflict>]}"
     )
-    try:
-        raw = backend.complete(
-            system=_ENTAILMENT_SYSTEM, user=user, max_tokens=500, temperature=0.0
-        )
-        data = extract_json(raw)
-        contradicted = {int(x) for x in (data.get("contradicted") or [])}
-        unsupported = {int(x) for x in (data.get("unsupported") or [])}
-    except (ValueError, TypeError, KeyError) as e:
-        log.warning("semantic verifier failed (%s); keeping deterministic result", e)
-        return claims
+    # Real backend only (callers gate on is_local): run it or fail loudly. We do
+    # not silently skip the fidelity check - a broken verifier must be visible.
+    raw = backend.complete(
+        system=_ENTAILMENT_SYSTEM, user=user, max_tokens=500, temperature=0.0, json_mode=True
+    )
+    data = extract_json(raw)
+    contradicted = {int(x) for x in (data.get("contradicted") or [])}
+    unsupported = {int(x) for x in (data.get("unsupported") or [])}
 
     def _valid(n: int) -> bool:
         return 0 <= n < len(verified_positions)

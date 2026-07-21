@@ -46,14 +46,27 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
 
     has_primary = any(d.is_primary for d in docs)
     mode = "report" if has_primary else "debate"
-    log.info("building %s-mode story for event %s", mode, event.id)
+    log.info(
+        "event %s: building %s-mode story from %d source(s) [%s]",
+        event.id, mode, len(docs), (event.title or "")[:60],
+    )
 
+    log.info("  [1/5] fact extractor (%s)...", ex_be.name)
     drafts = extract_claims(event, docs, ex_be)
+    log.info("  [2/5] verifier (%s) on %d claim(s)...", vf_be.name, len(drafts))
     verified = verify_claims(drafts, docs, backend=vf_be)
+    log.info("  [3/5] context (%s)...", ctx_be.name)
     context_md = build_context(event, verified, docs, ctx_be)
+    log.info("  [4/5] perspective/debate (%s)...", per_be.name)
     perspective_md = build_perspective(event, verified, docs, per_be)
+    log.info("  [5/5] editor/auditor (%s)...", ed_be.name)
     package = audit_and_assemble(
         event, verified, context_md, perspective_md, docs, mode=mode, backend=ed_be
+    )
+    log.info(
+        "  -> %s (%d claim(s) kept)",
+        "APPROVED" if package.editor_approved else "REJECTED",
+        len(package.claims),
     )
 
     package.agent_trace = {
