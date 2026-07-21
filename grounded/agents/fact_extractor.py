@@ -16,7 +16,7 @@ import logging
 import re
 from uuid import UUID
 
-from grounded.agents.llm import LLMBackend, extract_json
+from grounded.agents.llm import LLMBackend, extract_json, strip_reasoning
 from grounded.agents.schemas import ClaimDraft, EventView, SourceDoc
 
 log = logging.getLogger(__name__)
@@ -67,32 +67,23 @@ def build_prompt(event: EventView, docs: list[SourceDoc]) -> str:
         f"SOURCES:\n{_source_digest(_prompt_sources(docs))}\n\n"
         f"Extract the {MAX_CLAIMS} most important distinct, atomic, verifiable "
         "factual claims the sources above support (fewer is fine). Write each claim "
-        "as ONE concise sentence. For each claim list the source id(s) that back it. "
-        "Use only the ids shown above - do not invent ids. Prefer claims backed by "
-        "primary (official) sources or by multiple independent outlets.\n\n"
-        'Respond ONLY with JSON of the form:\n'
+        "as ONE short sentence (max ~25 words). For each claim list the source "
+        "id(s) that back it. Use only the ids shown above - do not invent ids. "
+        "Prefer claims backed by primary (official) sources or by multiple "
+        "independent outlets.\n\n"
+        "Output ONLY the JSON object below - no preamble, explanation, or reasoning.\n"
         '{"claims": [{"text": "<claim>", "source_ids": ["<id>", "..."]}]}'
     )
 
 
-def _salvage_claim_objects(raw: str) -> list[dict]:
-    """Recover complete claim objects from a truncated JSON array.
-
-    A model can be cut off mid-array (finish_reason=length), leaving unterminated
-    JSON. Rather than lose the whole batch, scan the ``claims`` array and keep
-    every ``{...}`` object that closed cleanly, discarding only the partial tail.
-    This uses the model's *real* output - it is not a local/offline substitution.
-    """
-    ci = raw.find('"claims"')
-    start = raw.find("[", ci) if ci != -1 else raw.find("[")
-    if start == -1:
-        return []
-    objs: list[dict] = []
+def _match_brace(text: str, start: int) -> int | None:
+    """Index just past the ``}`` matching the ``{`` at ``start``, or None if it
+    never closes (string-aware). Used to recover complete objects from truncated
+    output."""
     depth = 0
     in_str = esc = False
-    obj_start: int | None = None
-    for i in range(start + 1, len(raw)):
-        ch = raw[i]
+    for i in range(start, len(text)):
+        ch = text[i]
         if in_str:
             if esc:
                 esc = False
@@ -104,20 +95,42 @@ def _salvage_claim_objects(raw: str) -> list[dict]:
         if ch == '"':
             in_str = True
         elif ch == "{":
-            if depth == 0:
-                obj_start = i
             depth += 1
         elif ch == "}":
             depth -= 1
-            if depth == 0 and obj_start is not None:
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _salvage_claim_objects(raw: str) -> list[dict]:
+    """Recover complete claim objects from a truncated / preamble-polluted response.
+
+    A model can be cut off mid-response (finish_reason=length) so the outer
+    ``{"claims": [...]}`` wrapper never closes, or it can leak a reasoning
+    preamble before the JSON. Rather than lose the whole batch, strip any
+    reasoning block and scan the *entire* text for every ``{...}`` object that
+    closed cleanly and looks like a claim (has a ``text`` field), discarding only
+    the partial tail and the (unclosed) wrapper. This uses the model's *real*
+    output - it is not a local/offline substitution.
+    """
+    text = strip_reasoning(raw)
+    objs: list[dict] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "{":
+            end = _match_brace(text, i)
+            if end is not None:
                 try:
-                    objs.append(json.loads(raw[obj_start : i + 1]))
+                    obj = json.loads(text[i:end])
                 except json.JSONDecodeError:
-                    pass
-                obj_start = None
-        elif ch == "]" and depth == 0:
-            break
-    return [o for o in objs if isinstance(o, dict)]
+                    obj = None
+                if isinstance(obj, dict) and "text" in obj:
+                    objs.append(obj)
+                    i = end
+                    continue
+        i += 1
+    return objs
 
 
 def parse_response(raw: str, valid_ids: set[UUID]) -> list[ClaimDraft]:

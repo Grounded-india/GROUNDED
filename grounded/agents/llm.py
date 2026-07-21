@@ -283,6 +283,12 @@ _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECAS
 _THINK_OPEN = re.compile(r"<think\b[^>]*>.*", re.DOTALL | re.IGNORECASE)
 
 
+def strip_reasoning(text: str) -> str:
+    """Remove reasoning-model <think>...</think> blocks (incl. an unterminated one)."""
+    text = _THINK_BLOCK.sub("", text)
+    return _THINK_OPEN.sub("", text)
+
+
 def extract_json(text: str) -> Any:
     """Pull the first JSON value out of an LLM response.
 
@@ -293,8 +299,7 @@ def extract_json(text: str) -> Any:
     if not text or not text.strip():
         raise ValueError("empty LLM response")
 
-    text = _THINK_BLOCK.sub("", text)
-    text = _THINK_OPEN.sub("", text)  # drop a dangling, unclosed <think> too
+    text = strip_reasoning(text)
     if not text.strip():
         raise ValueError("LLM response was only a reasoning block, no JSON")
 

@@ -47,7 +47,8 @@ def cmd_build(force: bool, limit: int | None, event_id: str | None) -> None:
     click.echo(
         f"built {result['built']} story(ies) from {result['candidates']} candidate(s): "
         f"{result['approved']} approved ({result['debates']} as debate), "
-        f"{result['rejected']} rejected, {result['skipped']} skipped."
+        f"{result['rejected']} rejected, {result['skipped']} skipped, "
+        f"{result.get('failed', 0)} failed."
     )
 
 

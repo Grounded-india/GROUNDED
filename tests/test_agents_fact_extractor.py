@@ -64,6 +64,32 @@ def test_parse_response_salvages_truncated_json():
     assert [c.text for c in claims] == ["first complete claim", "second complete claim"]
 
 
+def test_parse_response_salvages_with_preamble_and_unclosed_wrapper():
+    # the real failure: a reasoning preamble + the outer {"claims":[...]} wrapper
+    # never closes (truncated). Inner complete objects must still be recovered.
+    raw = (
+        "We need to extract the most important claims. Here is the JSON:\n"
+        '{"claims": [\n'
+        f'  {{"text": "claim one", "source_ids": ["{ID_A}"]}},\n'
+        f'  {{"text": "claim two", "source_ids": ["{ID_A}"]}},\n'
+        f'  {{"text": "claim three cut off here'
+    )
+    claims = parse_response(raw, valid_ids={ID_A})
+    assert [c.text for c in claims] == ["claim one", "claim two"]
+
+
+def test_parse_response_salvages_after_reasoning_block():
+    # a <think> block (with stray braces) before truncated JSON must not confuse salvage
+    raw = (
+        "<think>maybe I should output {something} weird</think>\n"
+        '{"claims": ['
+        f'{{"text": "kept claim", "source_ids": ["{ID_A}"]}},'
+        f'{{"text": "partial'
+    )
+    claims = parse_response(raw, valid_ids={ID_A})
+    assert [c.text for c in claims] == ["kept claim"]
+
+
 def test_parse_response_raises_when_nothing_salvageable():
     import pytest
 

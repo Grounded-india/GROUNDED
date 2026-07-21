@@ -33,15 +33,23 @@ def build_stories(
     log.info("model routing: %s", models)
     log.info("processing %d candidate event(s)", len(work))
 
-    built = approved = rejected = skipped = debates = 0
+    built = approved = rejected = skipped = failed = debates = 0
     for idx, (event, docs) in enumerate(work, start=1):
         log.info("=== event %d/%d ===", idx, len(work))
         if not docs:
             log.warning("event %s has no sources; skipping", event.id)
             skipped += 1
             continue
-        package = build_story(event, docs, router)
-        save_story(package)
+        # Isolate per-event failures (e.g. a provider truncating a response beyond
+        # recovery) so one bad event doesn't abort the whole batch. The failure is
+        # logged loudly and counted - it is not silently swallowed or faked.
+        try:
+            package = build_story(event, docs, router)
+            save_story(package)
+        except Exception:
+            log.exception("event %s failed; skipping to next", event.id)
+            failed += 1
+            continue
         built += 1
         if package.agent_trace.get("mode") == "debate":
             debates += 1
@@ -58,4 +66,5 @@ def build_stories(
         "rejected": rejected,
         "debates": debates,
         "skipped": skipped,
+        "failed": failed,
     }
