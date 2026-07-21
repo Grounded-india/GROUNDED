@@ -30,10 +30,13 @@ log = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 1024              # matches raw_items.embedding VECTOR(1024)
 _EMBED_INPUT_CHARS = 2000        # truncate long content before embedding
-_VOYAGE_MAX_BATCH = 128
-# Voyage free tier without a payment method allows only 3 RPM. Sleeping ~21s
-# between consecutive API calls keeps us safely under that. Set to 0 once a
-# payment method is on file to unlock the standard rate limits.
+# Voyage free tier without a payment method: 3 RPM AND 10K TPM. A large batch
+# (~128 items × ~500 tokens = 64K tokens) violates the TPM cap on a single call.
+# 8 items × ~500 tokens ≈ 4K tokens per call keeps us under the TPM ceiling,
+# and the 21s sleep keeps us under the RPM ceiling. Once a payment method is
+# on file at https://dashboard.voyageai.com/, bump batch to 128 and sleep to 0
+# for full speed - the 200M free tokens still apply.
+_VOYAGE_MAX_BATCH = 8
 _VOYAGE_BATCH_SLEEP_SECONDS = 21.0
 
 
