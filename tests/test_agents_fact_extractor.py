@@ -138,3 +138,29 @@ def test_extract_claims_uses_local_when_backend_local():
     event = EventView(id=ID_A, title="e")
     claims = extract_claims(event, docs, LocalBackend())
     assert claims and all(c.source_item_ids == [ID_A] for c in claims)
+
+
+def test_parse_response_drops_boilerplate_claims():
+    raw = (
+        '{"claims": ['
+        f'{{"text": "You are logged in Loading...", "source_ids": ["{ID_A}"]}},'
+        f'{{"text": "Subscribe now to read the full story", "source_ids": ["{ID_A}"]}},'
+        f'{{"text": "The RBI cut the repo rate by 25 basis points.", "source_ids": ["{ID_A}"]}}'
+        "]}"
+    )
+    claims = parse_response(raw, valid_ids={ID_A})
+    assert [c.text for c in claims] == ["The RBI cut the repo rate by 25 basis points."]
+
+
+def test_local_extract_skips_paywall_boilerplate():
+    text = (
+        "Published - July 20, 2026 06:19 pm IST You are logged in Loading... "
+        "Subscribe now. Your active subscription gives you Premium Stories. "
+        "The union cabinet cleared the new manufacturing scheme on Monday afternoon."
+    )
+    claims = _local_extract([_doc(ID_A, SourceTier.WIRE, text)])
+    texts = [c.text for c in claims]
+    assert any("manufacturing scheme" in t for t in texts)
+    assert not any("logged in" in t.lower() for t in texts)
+    assert not any("subscribe" in t.lower() for t in texts)
+    assert not any("premium stories" in t.lower() for t in texts)

@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from grounded.agents.cleaning import is_boilerplate, strip_boilerplate
 from grounded.db import cursor
 
 # Outlet slugs that should render as acronyms rather than Title Case.
@@ -95,6 +96,8 @@ def _render_story(i: int, s: dict) -> list[str]:
     verifier = trace.get("verifier") or {}
     heading = f"{i}. {s['headline']}"
 
+    claims = [c for c in s["claims"] if not is_boilerplate(c["claim_text"] or "")]
+
     lines = ["", "---", "", f"## {heading}", ""]
     if s.get("dek"):
         lines += [f"*{s['dek'].strip()}*", ""]
@@ -102,25 +105,25 @@ def _render_story(i: int, s: dict) -> list[str]:
     badges = [mode.upper()]
     if trace.get("n_sources"):
         badges.append(f"{trace['n_sources']} sources")
-    badges.append(f"{len(s['claims'])} claim(s) kept")
+    badges.append(f"{len(claims)} claim(s) kept")
     if mode != "debate" and verifier.get("verified") is not None:
         badges.append(f"{verifier.get('verified', 0)} verified")
     lines += ["> " + "  ·  ".join(badges), ""]
 
-    context = (trace.get("context") or "").strip()
+    context = strip_boilerplate((trace.get("context") or "").strip())
     if context:
         lines += ["### Context", "", context, ""]
 
     if mode == "debate":
-        perspective = (trace.get("perspective") or "").strip()
+        perspective = strip_boilerplate((trace.get("perspective") or "").strip())
         if perspective:
             lines += ["### The debate", "", perspective, ""]
         lines += ["### Grounded points", ""]
     else:
         lines += ["### What we know", ""]
 
-    if s["claims"]:
-        for c in s["claims"]:
+    if claims:
+        for c in claims:
             outlets = ", ".join(_humanize(o) for o in (c["outlets"] or [])) or "unattributed"
             tag = " _(primary-source backed)_" if c["tier_1_backed"] else ""
             lines.append(f"- {c['claim_text'].strip()} — *{outlets}*{tag}")

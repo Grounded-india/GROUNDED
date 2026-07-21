@@ -16,6 +16,7 @@ import logging
 import re
 from uuid import UUID
 
+from grounded.agents.cleaning import is_boilerplate, strip_boilerplate
 from grounded.agents.llm import LLMBackend, extract_json, strip_reasoning
 from grounded.agents.schemas import ClaimDraft, EventView, SourceDoc
 
@@ -51,7 +52,7 @@ def _prompt_sources(docs: list[SourceDoc]) -> list[SourceDoc]:
 def _source_digest(docs: list[SourceDoc]) -> str:
     blocks = []
     for d in docs:
-        body = (d.text or "").strip()
+        body = strip_boilerplate((d.text or "").strip())
         if len(body) > _SOURCE_TEXT_BUDGET:
             body = body[:_SOURCE_TEXT_BUDGET] + " ..."
         blocks.append(
@@ -149,7 +150,7 @@ def parse_response(raw: str, valid_ids: set[UUID]) -> list[ClaimDraft]:
         if not isinstance(item, dict):
             continue
         text = (item.get("text") or "").strip()
-        if not text:
+        if not text or is_boilerplate(text):
             continue
         raw_ids = item.get("source_ids") or item.get("source_item_ids") or []
         ids: list[UUID] = []
@@ -180,6 +181,8 @@ def _local_extract(docs: list[SourceDoc]) -> list[ClaimDraft]:
         for sentence in _SENTENCE_SPLIT.split(text):
             s = " ".join(sentence.split())
             if not (_LOCAL_MIN_LEN <= len(s) <= _LOCAL_MAX_LEN):
+                continue
+            if is_boilerplate(s):
                 continue
             key = s.lower()
             if key in seen:
