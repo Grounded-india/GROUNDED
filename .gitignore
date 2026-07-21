@@ -24,7 +24,8 @@ dist/
 Thumbs.db
 
 # Project
-output/
+# NOTE: output/ is intentionally NOT ignored so daily edition markdown files
+# are archived in git as a history of what the pipeline produced.
 *.log
 .pytest_cache/
 .ruff_cache/
