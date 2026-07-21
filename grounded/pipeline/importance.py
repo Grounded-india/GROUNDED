@@ -49,14 +49,20 @@ POLICY_IMPACT_KEYWORDS: tuple[str, ...] = (
     "petition", "fine", "penalty",
 )
 
-# Language typical of outrage cycles, celebrity noise, and unverified virality.
+# Language typical of outrage cycles, celebrity noise, unverified virality,
+# and sports/entertainment events that are not "news the reader needs alerted
+# about". Sports finals get big cross-source coverage on Indian wires but do
+# not warrant top-of-edition placement in a fact-driven daily.
 DOWNWEIGHT_KEYWORDS: tuple[str, ...] = (
     "viral", "goes viral", "netizens", "trolls", "trolled", "slams", "slammed",
-    "backlash", "outrage", "twitter reacts", "internet reacts", "fans", "meme",
+    "backlash", "twitter reacts", "internet reacts", "fans", "meme",
     "bollywood", "box office", "trailer", "teaser", "actor", "actress",
     "celebrity", "star kid", "wedding", "dating", "girlfriend", "boyfriend",
     "instagram", "reels", "controversy erupts", "war of words", "spat",
     "shocking", "you won't believe", "sensational", "gossip",
+    # Sports / entertainment events (not attention-worthy news):
+    "world cup", "champions league", "trophy", "medal ceremony", "olympic gold",
+    "playoffs", "grand final", "final match", "halftime show",
 )
 
 # Ground-reality events: protests, incidents, resignations, court verdicts,
@@ -115,8 +121,10 @@ class EventFeatures:
     distinct_sources: int
     tier1_sources: int
     tier2_sources: int
+    tier3_sources: int
     has_tier1: bool
     has_tier2: bool
+    has_tier3: bool
     signal_only: bool
     policy_impact_hits: int
     ground_reality_hits: int
@@ -147,8 +155,10 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
     distinct_sources = {it.source_name for it in items}
     tier1 = {it.source_name for it in items if int(it.source_tier) == SourceTier.PRIMARY}
     tier2 = {it.source_name for it in items if int(it.source_tier) == SourceTier.WIRE}
+    tier3 = {it.source_name for it in items if int(it.source_tier) == SourceTier.SIGNAL}
     has_tier1 = bool(tier1)
     has_tier2 = bool(tier2)
+    has_tier3 = bool(tier3)
     signal_only = all(int(it.source_tier) == SourceTier.SIGNAL for it in items)
 
     combined = " \n ".join(
@@ -168,8 +178,10 @@ def extract_features(items: list[ItemView], now: datetime | None = None) -> Even
         distinct_sources=len(distinct_sources),
         tier1_sources=len(tier1),
         tier2_sources=len(tier2),
+        tier3_sources=len(tier3),
         has_tier1=has_tier1,
         has_tier2=has_tier2,
+        has_tier3=has_tier3,
         signal_only=signal_only,
         policy_impact_hits=len(policy),
         ground_reality_hits=len(ground_reality),
@@ -216,7 +228,10 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
     # Policy / legal / fiscal impact.
     score += min(f.policy_impact_hits, 5) * 0.5
     # Ground-reality impact (protests, arrests, verdicts, resignations, etc.).
-    score += min(f.ground_reality_hits, 5) * 0.5
+    # Weighted higher than policy hits because ground-reality events are what
+    # the project explicitly wants to surface — attention-worthy news rather
+    # than press-release readouts.
+    score += min(f.ground_reality_hits, 5) * 0.8
 
     # India relevance — the whole product is India-focused. This is a large
     # lever comparable to tier-1 anchoring, applied as a SWING not a bonus:
@@ -228,6 +243,34 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
         score += 3.0
     elif f.india_hits == 0:
         score -= 4.0
+
+    # ATTENTION SIGNAL — the point of a fact-driven news channel.
+    # When multiple independent wires are reporting a ground-reality event
+    # that the government has NOT put out an official statement on, that IS
+    # the story the reader needs alerted about. This is what "not addressed
+    # by government but prominent on the ground" looks like in signal terms.
+    if (not f.has_tier1) and f.tier2_sources >= 2 and f.ground_reality_hits >= 1:
+        score += 2.5
+
+    # CROSS-TIER CORROBORATION — an event backed by both wire reporting AND
+    # social signal (Reddit) has real ground presence, not just newsroom
+    # desks echoing each other. Small bonus that helps ground-reality stories
+    # break through against government policy readouts.
+    if f.has_tier3 and (f.has_tier1 or f.has_tier2):
+        score += 1.0
+
+    # PURE-GOVERNMENT-READOUT downweight. A tier-1 press release with no
+    # ground-reality signal, no wire pickup, no meaningful cross-source
+    # corroboration is a policy brochure, not news deserving top placement.
+    # Softly downweighted (not banned) to make room for attention-worthy
+    # stories the government hasn't spoken to.
+    if (
+        f.has_tier1
+        and not f.has_tier2
+        and f.ground_reality_hits == 0
+        and f.distinct_sources <= 2
+    ):
+        score -= 1.5
 
     # Recency: linear decay to zero across the window.
     score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)
