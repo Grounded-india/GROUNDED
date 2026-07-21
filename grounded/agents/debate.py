@@ -38,6 +38,26 @@ def _today_line() -> str:
     now = datetime.now().astimezone()
     return f"TODAY IS {now:%A, %d %B %Y}."
 
+_MODERATOR_SYSTEM = (
+    "You are a neutral news moderator writing the closing takeaway on a "
+    "back-and-forth debate that has just concluded. You have the facts block, "
+    "both sides' opening statements, and both sides' rebuttals. You are NOT an "
+    "advocate for either side.\n"
+    "\n"
+    "Write a compact 'bottom line' that:\n"
+    "- Names what both sides agreed on (the settled facts of the story).\n"
+    "- Names what they actually disagreed on and what the load-bearing question "
+    "for the reader is.\n"
+    "- Where a cited source clearly settles a factual point that one side "
+    "denied, state that plainly and cite the source. Do NOT declare a winner on "
+    "questions of judgement, policy, or values - only on facts the sources "
+    "have already resolved.\n"
+    "- Every factual claim must trace to a source in the facts block, cited in "
+    "parentheses (outlet_name). No outside knowledge, no invented facts.\n"
+    "- 2-4 sentences. Compact, readable, no lists, no headings, no meta-"
+    "commentary about the debate itself."
+)
+
 _FRAMING_SYSTEM = (
     "Name the two real opposing sides of this Indian news event. Use the actual "
     "actor named in the sources ('Delhi Police', 'The Opposition', 'The CJP "
@@ -136,6 +156,7 @@ class DebateResult:
     opening_b: str
     rebuttal_a: str
     rebuttal_b: str
+    conclusion: str = ""
     trace: dict = field(default_factory=dict)
 
     @property
@@ -150,7 +171,10 @@ class DebateResult:
             turns.append((f"{self.label_a} (rebuttal)", self.rebuttal_a.strip()))
         if self.rebuttal_b.strip():
             turns.append((f"{self.label_b} (closing)", self.rebuttal_b.strip()))
-        return "\n\n".join(f"**{label}:** {text}" for label, text in turns)
+        body = "\n\n".join(f"**{label}:** {text}" for label, text in turns)
+        if self.conclusion.strip():
+            body += f"\n\n**Bottom line:** {self.conclusion.strip()}"
+        return body
 
 
 def _facts_block(claims: list[VerifiedClaim], docs: list[SourceDoc]) -> str:
@@ -218,6 +242,43 @@ def _argue(
     ).strip()
 
 
+def _moderate(
+    event: EventView,
+    facts: str,
+    label_a: str,
+    label_b: str,
+    opening_a: str,
+    opening_b: str,
+    rebuttal_a: str,
+    rebuttal_b: str,
+    backend: LLMBackend,
+) -> str:
+    """Run the neutral moderator's closing takeaway."""
+    turns_block = ""
+    for label, text in [
+        (label_a, opening_a),
+        (label_b, opening_b),
+        (f"{label_a} (rebuttal)", rebuttal_a),
+        (f"{label_b} (closing)", rebuttal_b),
+    ]:
+        if text and text.strip():
+            turns_block += f"\n\n[{label}]\n{text.strip()}"
+
+    user = (
+        f"{_today_line()}\n\n"
+        f"EVENT: {event.title}\n\n"
+        f"FACTS (all citations must trace to entries here):\n{facts}\n\n"
+        f"THE DEBATE JUST HELD:{turns_block}\n\n"
+        "Write the neutral 'bottom line' takeaway now."
+    )
+    return backend.complete(
+        system=_MODERATOR_SYSTEM,
+        user=user,
+        max_tokens=500,
+        temperature=0.3,
+    ).strip()
+
+
 def _local_debate(
     event: EventView, claims: list[VerifiedClaim], docs: list[SourceDoc]
 ) -> DebateResult:
@@ -253,6 +314,13 @@ def _local_debate(
         f"source ({', '.join(tier1) if tier1 else 'none available'}), the "
         "underlying claim remains uncorroborated by any official record."
     )
+    conclusion = (
+        f"Both sides accept the outlets summarized above. What is contested is "
+        f"whether {len(outlets)} independent non-primary outlet(s) constitute "
+        "sufficient corroboration in the absence of an official record. Until a "
+        "primary source confirms the specifics, treat this as reporting rather "
+        "than established fact."
+    )
     return DebateResult(
         label_a="What is being reported",
         label_b="Why it remains unverified",
@@ -260,6 +328,7 @@ def _local_debate(
         opening_b=opening_b,
         rebuttal_a=rebuttal_a,
         rebuttal_b=rebuttal_b,
+        conclusion=conclusion,
         trace={"mode": "local"},
     )
 
@@ -309,6 +378,15 @@ def run_debate(
         backend=backend, turn="CLOSING (address the other side's rebuttal)",
     )
 
+    # Turn 5: neutral moderator wrap-up. Reads everything, states what is
+    # settled and what remains contested. Does not pick a winner on judgement.
+    conclusion = _moderate(
+        event, facts,
+        label_a, label_b,
+        opening_a, opening_b, rebuttal_a, rebuttal_b,
+        backend,
+    )
+
     return DebateResult(
         label_a=label_a,
         label_b=label_b,
@@ -316,9 +394,10 @@ def run_debate(
         opening_b=opening_b,
         rebuttal_a=rebuttal_a,
         rebuttal_b=rebuttal_b,
+        conclusion=conclusion,
         trace={
             "mode": backend.name,
             "sides": [label_a, label_b],
-            "turns": ["opening_a", "opening_b", "rebuttal_a", "rebuttal_b"],
+            "turns": ["opening_a", "opening_b", "rebuttal_a", "rebuttal_b", "conclusion"],
         },
     )
