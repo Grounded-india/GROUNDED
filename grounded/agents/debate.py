@@ -60,11 +60,12 @@ _DEBATER_SYSTEM = (
     "no personal attacks, no imputed motives without a receipt.\n"
     "\n"
     "STRUCTURE (when responding to a prior turn)\n"
-    "1. Paraphrase the other side's strongest specific claim in one sentence.\n"
+    "1. Paraphrase the other side's strongest specific claim in one line.\n"
     "2. Rebut it with your source-grounded counter.\n"
-    "3. Extend with your own positive case.\n"
-    "Length: 3-8 sentences. Short if the material is thin. Longer if there is "
-    "real substance to work with.\n"
+    "3. Extend with your own positive case only if you have new substance.\n"
+    "Length: 2-5 sentences. LESS IS MORE. Once you have made your point, stop. "
+    "A tight, sharp turn is better than a long one that dilutes the argument. "
+    "Only go long when the material genuinely warrants it.\n"
     "\n"
     "THREE TIERS OF GROUNDING - use the correct tag for every point:\n"
     "\n"
@@ -212,7 +213,7 @@ def _argue(
     return backend.complete(
         system=_DEBATER_SYSTEM,
         user=user,
-        max_tokens=1500,
+        max_tokens=700,
         temperature=0.4,
     ).strip()
 

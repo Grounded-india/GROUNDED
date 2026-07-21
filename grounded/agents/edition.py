@@ -54,13 +54,18 @@ def _slug(heading: str) -> str:
 def _fetch(approved_only: bool) -> list[dict]:
     where = "WHERE s.editor_approved" if approved_only else ""
     with cursor() as cur:
+        # Order by event importance so the top-ranked event lands at story #1.
+        # Fall back to created_at DESC as a tiebreaker (and for the rare
+        # story whose event has no score yet).
         cur.execute(
             f"""
             SELECT s.id, s.event_id, s.headline, s.dek, s.editor_approved,
-                   s.editor_notes, s.agent_trace, s.created_at
+                   s.editor_notes, s.agent_trace, s.created_at,
+                   e.importance_score
             FROM stories s
+            LEFT JOIN events e ON e.id = s.event_id
             {where}
-            ORDER BY s.created_at DESC
+            ORDER BY e.importance_score DESC NULLS LAST, s.created_at DESC
             """
         )
         stories = cur.fetchall()
