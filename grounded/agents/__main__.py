@@ -104,5 +104,29 @@ def cmd_show(event_id: str) -> None:
     click.echo(row["body_markdown"] or "(empty)")
 
 
+@cli.command("edition")
+@click.option("--all", "include_all", is_flag=True, help="Include rejected stories too.")
+@click.option("--out", "out_path", default=None, help="Output file (default OUTPUT_DIR/edition-<date>.md).")
+@click.option("--print", "to_stdout", is_flag=True, help="Print to stdout instead of writing a file.")
+def cmd_edition(include_all: bool, out_path: str | None, to_stdout: bool) -> None:
+    """Render all stories into one clean, single-page markdown newspaper."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from grounded.agents.edition import render_edition
+    from grounded.config import settings
+
+    md = render_edition(approved_only=not include_all)
+    if to_stdout:
+        click.echo(md)
+        return
+    if out_path is None:
+        out_dir = Path(settings.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = str(out_dir / f"edition-{datetime.now():%Y-%m-%d}.md")
+    Path(out_path).write_text(md, encoding="utf-8")
+    click.echo(f"wrote {out_path}")
+
+
 if __name__ == "__main__":
     cli()
