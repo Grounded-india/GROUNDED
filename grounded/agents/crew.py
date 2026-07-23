@@ -26,6 +26,7 @@ from grounded.agents.context import build_context
 from grounded.agents.editor import audit_and_assemble
 from grounded.agents.fact_extractor import extract_claims
 from grounded.agents.perspective import build_perspective
+from grounded.agents.reporter import build_report
 from grounded.agents.router import as_router
 from grounded.agents.schemas import EventView, SourceDoc, StoryPackage
 from grounded.agents.verifier import verify_claims
@@ -33,10 +34,12 @@ from grounded.agents.verifier import verify_claims
 log = logging.getLogger(__name__)
 
 
-# Keywords that indicate genuine controversy / opposition / dispute in the
-# source material. When any of these appears, the story is presented as a
-# debate instead of a plain report. Matched case-insensitively as substrings
-# of title+content across all docs for the event.
+# Cheap keyword pre-filter — a broad hint that a story MIGHT be contested.
+# This is not the decision: any candidate that hits a keyword goes through
+# the LLM validator (:func:`_decide_mode`), which actually reads the source
+# material and rules on whether a debate is warranted. The keyword list is
+# deliberately generous so we don't miss real debates; the LLM prunes the
+# false positives.
 CONTROVERSY_KEYWORDS: tuple[str, ...] = (
     "opposition", "opposed", "opponent", "rival",
     "critic", "critics", "criticise", "criticised", "criticize", "criticized",
@@ -55,11 +58,104 @@ CONTROVERSY_KEYWORDS: tuple[str, ...] = (
     "walkout", "boycott", "no confidence",
 )
 
+_CONTROVERSY_HIT_THRESHOLD = 1  # any hit = candidate; LLM makes the actual call
+
 
 def _count_controversy_hits(docs: list[SourceDoc]) -> int:
     """Count distinct controversy keywords present across all docs."""
     blob = " \n ".join(f"{d.title or ''} {d.text or ''}" for d in docs).lower()
     return sum(1 for kw in CONTROVERSY_KEYWORDS if kw in blob)
+
+
+_MODE_SYSTEM = (
+    "You classify Indian news stories into DEBATE-format or REPORT-format. "
+    "Return valid JSON only, no prose outside the object."
+)
+
+_MODE_USER_TEMPLATE = (
+    "EVENT: __TITLE__\n\n"
+    "SOURCE SNIPPETS:\n__SNIPPETS__\n\n"
+    "You are deciding whether this Indian news event should be presented as a "
+    "DEBATE (two actors argue their sides) or a REPORT (single-narrative "
+    "reporting of facts).\n\n"
+    "DEBATE — the sources contain TWO distinct actors/coalitions with "
+    "CONFLICTING positions on the same question, AND each side has enough "
+    "material in the sources for a debater to argue their position for a "
+    "few paragraphs. Typical actor pairs: government vs opposition, "
+    "protesters vs police, ministry vs court, party A vs party B, employer "
+    "vs union, activists vs establishment, defenders vs critics. The "
+    "'weaker side' does not need a wall of quotes — a coherent stated "
+    "position with at least one substantive reason or counter-claim is "
+    "enough. Denial + reasoning counts. Bare denial without reasoning "
+    "does not.\n\n"
+    "REPORT — a single-narrative event with no genuinely opposing actors "
+    "represented in the material. Examples: a scheme was announced (no "
+    "critic in the sources), a minister inaugurated a project, an "
+    "accident occurred, a person died, a sports result, an obituary, a "
+    "government readout with no rebuttal.\n\n"
+    "DEFAULT — when in genuine doubt on a story that clearly has "
+    "controversy signals (protest, allegation, dispute, denial, crackdown, "
+    "condemnation), pick DEBATE. The reader benefits more from a two-sided "
+    "presentation of a contested event than a one-sided report.\n\n"
+    'Return JSON: {"mode": "debate" | "report", "reason": "<one short sentence identifying the two sides or explaining why only one exists>"}'
+)
+
+
+def _decide_mode(
+    event: EventView, docs: list[SourceDoc], backend
+) -> tuple[str, str]:
+    """Two-stage mode decision: cheap keyword pre-filter, then LLM validator.
+
+    Stage 1 — count distinct controversy keywords. If below threshold, the
+    story is definitely a REPORT (skip the LLM call entirely — saves budget on
+    the majority of daily events, which are single-narrative).
+
+    Stage 2 — for the candidates that pass the pre-filter, ask an LLM whether
+    the sources actually contain substantive opposing actors. The LLM's answer
+    is final; keyword hits alone never promote to debate.
+
+    Fallback path — if the LLM is unavailable (local backend) or the call
+    errors, hedge to whatever the keyword pre-filter suggested: pre-filter
+    hits → debate (preserve legacy offline behaviour); no hits → report.
+    """
+    hits = _count_controversy_hits(docs)
+    if hits < _CONTROVERSY_HIT_THRESHOLD:
+        return "report", f"no substantive controversy signal ({hits} keyword hit(s))"
+
+    if backend is None or getattr(backend, "is_local", False):
+        return "debate", f"keyword pre-filter ({hits} hits); no LLM validator available"
+
+    from grounded.agents.llm import extract_json
+
+    snippets = "\n---\n".join(
+        f"[{d.source_name}] {(d.title or '').strip()}\n"
+        f"{(d.text or '').strip()[:400]}"
+        for d in docs[:6]
+    )
+    # Use plain .replace instead of str.format so the JSON example in the
+    # template ('{"mode": ...}') is not read as a format placeholder.
+    user = _MODE_USER_TEMPLATE.replace(
+        "__TITLE__", (event.title or "")[:200]
+    ).replace("__SNIPPETS__", snippets)
+    try:
+        raw = backend.complete(
+            system=_MODE_SYSTEM,
+            user=user,
+            max_tokens=200,
+            temperature=0.0,
+            json_mode=True,
+        )
+        data = extract_json(raw)
+        if not isinstance(data, dict):
+            return "debate", f"LLM returned non-object; kept keyword verdict ({hits} hits)"
+        mode = str(data.get("mode") or "").strip().lower()
+        reason = str(data.get("reason") or "").strip()[:200]
+        if mode not in ("debate", "report"):
+            return "debate", f"LLM returned unknown mode {mode!r}; kept keyword verdict"
+        return mode, reason or f"{hits} keyword hits; LLM classified as {mode}"
+    except Exception as e:
+        log.warning("mode classifier failed (%s); keeping keyword verdict", e)
+        return "debate", f"validator error: {e}; kept keyword verdict ({hits} hits)"
 
 
 def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryPackage:
@@ -81,11 +177,14 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
     ed_be = router.for_role("editor")
 
     has_primary = any(d.is_primary for d in docs)
-    controversy_hits = _count_controversy_hits(docs)
-    mode = "debate" if controversy_hits >= 1 else "report"
+    # Two-stage decision: cheap keyword pre-filter (drops obvious reports),
+    # then LLM validator (checks the survivors for substantive opposing sides).
+    # The LLM uses the editor backend (Gemini) since it's a small structured
+    # JSON call and Gemini is fast + cheap for that.
+    mode, mode_reason = _decide_mode(event, docs, ed_be)
     log.info(
-        "event %s: building %s-mode story from %d source(s) [primary=%s, controversy_hits=%d] [%s]",
-        event.id, mode, len(docs), has_primary, controversy_hits, (event.title or "")[:60],
+        "event %s: building %s-mode story from %d source(s) [primary=%s] [%s] — %s",
+        event.id, mode, len(docs), has_primary, (event.title or "")[:60], mode_reason,
     )
 
     log.info("  [1/5] fact extractor (%s)...", ex_be.name)
@@ -106,10 +205,21 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
         len(package.claims),
     )
 
+    # REPORT mode: run the dedicated reporter to produce a long-form article
+    # body. Only for approved reports (skip if editor rejected — the story
+    # will be filtered out downstream anyway).
+    if mode == "report" and package.editor_approved:
+        rp_be = router.for_role("reporter")
+        log.info("  [+report] reporter (%s)...", rp_be.name)
+        report_body = build_report(event, package.claims, context_md, docs, rp_be)
+        if report_body:
+            package.body_markdown = report_body
+
     package.agent_trace = {
         "mode": mode,
+        "mode_reason": mode_reason,
         "has_primary": has_primary,
-        "controversy_hits": controversy_hits,
+        "controversy_hits": _count_controversy_hits(docs),
         "models": router.summary(),
         "n_sources": len(docs),
         "fact_extractor": {

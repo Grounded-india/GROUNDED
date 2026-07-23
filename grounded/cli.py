@@ -12,7 +12,11 @@ import click
 import grounded.ingest.sources  # noqa: F401
 from grounded.config import settings
 from grounded.db import close_pool
-from grounded.ingest.base import all_sources, get_source, store_raw_items
+from grounded.ingest.base import (
+    all_sources,
+    get_source,
+    store_raw_items,
+)
 from grounded.models import SourceTier
 
 atexit.register(close_pool)
@@ -58,7 +62,7 @@ def cmd_sources() -> None:
     help="Run only sources at this tier (1=primary, 2=wire, 3=signal).",
 )
 def cmd_ingest(source_name: str | None, tier: int | None) -> None:
-    """Fetch from sources and store raw items."""
+    """Fetch from registered sources and store raw items."""
     if source_name:
         src = get_source(source_name)
         if src is None:
@@ -71,7 +75,7 @@ def cmd_ingest(source_name: str | None, tier: int | None) -> None:
             click.echo(f"No sources at tier {tier}", err=True)
             sys.exit(1)
     else:
-        sources = all_sources()
+        sources = list(all_sources())
 
     total_inserted = 0
     total_skipped = 0
@@ -164,7 +168,10 @@ def cmd_cluster(similarity: float | None, window_hours: float | None) -> None:
     """Layer 2: cluster embedded items into events."""
     from grounded.pipeline.clustering import build_events
 
-    n = build_events(similarity_threshold=similarity, time_window_hours=window_hours)
+    n = build_events(
+        similarity_threshold=similarity,
+        time_window_hours=window_hours,
+    )
     click.echo(f"Created {n} event(s).")
 
 

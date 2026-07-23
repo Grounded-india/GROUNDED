@@ -32,6 +32,8 @@ ROLE_PROVIDER: dict[str, str] = {
     "context": "nemotron",
     "perspective": "nemotron",
     "editor": "gemini",
+    "reporter": "nemotron",  # long-form report body writer (REPORT mode only)
+    "deduper": "gemini",     # post-build "same story?" pairwise check
 }
 
 _PROVIDER_FACTORY = {

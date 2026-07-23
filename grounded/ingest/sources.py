@@ -65,31 +65,8 @@ register_source(
     )
 )
 
-# LiveLaw and Bar and Bench report court proceedings + quote primary court
-# documents (judgments, orders) verbatim. Treated as tier 1 because their
-# claims are auditable against the primary record.
-register_source(
-    GoogleNewsSource(
-        name="livelaw",
-        tier=SourceTier.PRIMARY,
-        query="site:livelaw.in",
-        when="1d",
-        max_entries=30,
-    )
-)
-
-register_source(
-    GoogleNewsSource(
-        name="bar_and_bench",
-        tier=SourceTier.PRIMARY,
-        query="site:barandbench.com",
-        when="1d",
-        max_entries=30,
-    )
-)
-
 # ------------------------------------------------------------
-# Tier 2 — wire services + accessible Indian outlets
+# Tier 2 — wire services
 # ------------------------------------------------------------
 
 register_source(
@@ -125,58 +102,6 @@ register_source(
         tier=SourceTier.WIRE,
         query="site:indianexpress.com",
         when="1d",
-    )
-)
-
-# Additional accessible Indian outlets (all serve full content to scrapers,
-# unlike Reuters/NYT/FT which are paywalled or bot-blocked).
-register_source(
-    GoogleNewsSource(
-        name="the_wire",
-        tier=SourceTier.WIRE,
-        query="site:thewire.in",
-        when="1d",
-        max_entries=30,
-    )
-)
-
-register_source(
-    GoogleNewsSource(
-        name="scroll",
-        tier=SourceTier.WIRE,
-        query="site:scroll.in",
-        when="1d",
-        max_entries=30,
-    )
-)
-
-register_source(
-    GoogleNewsSource(
-        name="the_print",
-        tier=SourceTier.WIRE,
-        query="site:theprint.in",
-        when="1d",
-        max_entries=30,
-    )
-)
-
-register_source(
-    GoogleNewsSource(
-        name="news_minute",
-        tier=SourceTier.WIRE,
-        query="site:thenewsminute.com",
-        when="1d",
-        max_entries=30,
-    )
-)
-
-register_source(
-    GoogleNewsSource(
-        name="livemint",
-        tier=SourceTier.WIRE,
-        query="site:livemint.com",
-        when="1d",
-        max_entries=30,
     )
 )
 
@@ -234,3 +159,4 @@ register_source(
         max_entries=100,
     )
 )
+

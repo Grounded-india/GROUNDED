@@ -52,16 +52,14 @@ def _slug(heading: str) -> str:
 
 
 def _fetch(approved_only: bool) -> list[dict]:
+    """Load stories with per-story claim + signal-item enrichment."""
     where = "WHERE s.editor_approved" if approved_only else ""
     with cursor() as cur:
-        # Order by event importance so the top-ranked event lands at story #1.
-        # Fall back to created_at DESC as a tiebreaker (and for the rare
-        # story whose event has no score yet).
         cur.execute(
             f"""
             SELECT s.id, s.event_id, s.headline, s.dek, s.editor_approved,
-                   s.editor_notes, s.agent_trace, s.created_at,
-                   e.importance_score
+                   s.editor_notes, s.body_markdown,
+                   s.agent_trace, s.created_at, e.importance_score
             FROM stories s
             LEFT JOIN events e ON e.id = s.event_id
             {where}
@@ -133,25 +131,47 @@ def _render_story(i: int, s: dict) -> list[str]:
     lines += ["> " + "  ·  ".join(badges), ""]
 
     context = strip_boilerplate((trace.get("context") or "").strip())
-    if context:
-        lines += ["### Context", "", context, ""]
 
     if mode == "debate":
+        # DEBATE stories: keep the existing layout — context paragraph, then
+        # the 4-turn dialogue + moderator wrap, then the grounded claim list.
+        if context:
+            lines += ["### Context", "", context, ""]
         perspective = strip_boilerplate((trace.get("perspective") or "").strip())
         if perspective:
             lines += ["### The debate", "", perspective, ""]
         lines += ["### Grounded points", ""]
+        if claims:
+            for c in claims:
+                outlets = ", ".join(_humanize(o) for o in (c["outlets"] or [])) or "unattributed"
+                tag = " _(primary-source backed)_" if c["tier_1_backed"] else ""
+                lines.append(f"- {c['claim_text'].strip()} — *{outlets}*{tag}")
+        else:
+            lines.append("- _No claims cleared the editor._")
+        lines.append("")
     else:
-        lines += ["### What we know", ""]
-
-    if claims:
-        for c in claims:
-            outlets = ", ".join(_humanize(o) for o in (c["outlets"] or [])) or "unattributed"
-            tag = " _(primary-source backed)_" if c["tier_1_backed"] else ""
-            lines.append(f"- {c['claim_text'].strip()} — *{outlets}*{tag}")
-    else:
-        lines.append("- _No claims cleared the editor._")
-    lines.append("")
+        # REPORT stories: render the reporter's long-form body_markdown
+        # directly. It already weaves the facts into prose with inline
+        # citations, so the "### What we know" bullet list is redundant.
+        # If no body_markdown (older story or reporter skipped), fall back
+        # to the legacy bullet-list layout so nothing renders empty.
+        body = strip_boilerplate((s.get("body_markdown") or "").strip())
+        if body:
+            if context:
+                lines += ["### Context", "", context, ""]
+            lines += ["### Report", "", body, ""]
+        else:
+            if context:
+                lines += ["### Context", "", context, ""]
+            lines += ["### What we know", ""]
+            if claims:
+                for c in claims:
+                    outlets = ", ".join(_humanize(o) for o in (c["outlets"] or [])) or "unattributed"
+                    tag = " _(primary-source backed)_" if c["tier_1_backed"] else ""
+                    lines.append(f"- {c['claim_text'].strip()} — *{outlets}*{tag}")
+            else:
+                lines.append("- _No claims cleared the editor._")
+            lines.append("")
 
     outlets = _story_outlets(s)
     if outlets:
@@ -191,7 +211,7 @@ def render_edition(approved_only: bool = True) -> str:
         f"{n} stor{'y' if n == 1 else 'ies'}*",
         "",
     ]
-    if not stories:
+    if n == 0:
         out += ["_No stories yet — run `python -m grounded.agents build` first._", ""]
         return "\n".join(out)
 
@@ -206,6 +226,7 @@ def render_edition(approved_only: bool = True) -> str:
         out += _render_story(i, s)
 
     out += [
+        "",
         "---",
         "",
         "*Every claim above was extracted from source material, verified against "

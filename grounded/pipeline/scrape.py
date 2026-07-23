@@ -38,6 +38,30 @@ _MIN_INTERVAL_PER_HOST_SECONDS = 2.0
 # Cap on how long we spend on a single URL (network + parse).
 _PER_URL_TIMEOUT_SECONDS = 25.0
 
+# Hostnames that consistently return 401/403 to unauthenticated scrapers.
+# Skipped upfront (no HTTP request, no politeness delay burned). The item's
+# RSS summary is still available for clustering / fact extraction — we just
+# do not fetch a body we know we cannot get. Add here as new paywalls are
+# discovered.
+_PAYWALLED_HOSTS: frozenset[str] = frozenset({
+    "www.reuters.com", "reuters.com",
+    "www.bloomberg.com", "bloomberg.com",
+    "www.nytimes.com", "nytimes.com",
+    "www.ft.com", "ft.com",
+    "www.wsj.com", "wsj.com",
+    "www.washingtonpost.com", "washingtonpost.com",
+    "www.economist.com", "economist.com",
+    "www.pib.gov.in", "pib.gov.in",
+    "www.ndtv.com", "ndtv.com",
+    "newlinesmag.com", "www.newlinesmag.com",
+    "www.newyorker.com", "newyorker.com",
+    "www.theatlantic.com", "theatlantic.com",
+})
+
+
+def _is_paywalled(host: str) -> bool:
+    return host.lower() in _PAYWALLED_HOSTS
+
 
 def _host(url: str) -> str:
     try:
@@ -134,11 +158,26 @@ def _fetch_reddit_body(client: httpx.Client, url: str) -> str:
             old_url = old_url.replace(prefix, "://old.reddit.com/", 1)
             break
 
-    try:
-        resp = client.get(old_url, timeout=_PER_URL_TIMEOUT_SECONDS)
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        log.warning("reddit fetch failed for %s: %s", old_url, e)
+    # One-shot retry on 5xx (Reddit occasionally returns transient 500s that
+    # clear on retry). 4xx stays terminal.
+    resp = None
+    for attempt in (1, 2):
+        try:
+            resp = client.get(old_url, timeout=_PER_URL_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            break
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if 500 <= status < 600 and attempt == 1:
+                log.info("reddit %s on %s; retrying in 3s", status, old_url)
+                time.sleep(3.0)
+                continue
+            log.warning("reddit fetch failed for %s: %s", old_url, e)
+            return ""
+        except httpx.HTTPError as e:
+            log.warning("reddit fetch failed for %s: %s", old_url, e)
+            return ""
+    if resp is None:
         return ""
 
     soup = BeautifulSoup(resp.text, "lxml")
@@ -233,12 +272,22 @@ def scrape_selected_events(force: bool = False) -> dict:
     scraped = 0
     empty = 0
     failed = 0
+    paywalled = 0
 
     with make_client() as client:
         for row in pending:
             raw_url = row["source_url"]
             url = _resolve_url(raw_url)  # decode Google News redirects to publisher URL
             host = _host(url)
+
+            # Known paywalled/bot-blocked hosts — skip immediately. No HTTP
+            # request, no politeness delay. RSS summary is still available for
+            # clustering / fact extraction; we simply do not fetch the body.
+            if _is_paywalled(host):
+                log.info("[paywalled] skipped %s (%s)", host, row["source_name"])
+                _store(row["id"], "")
+                paywalled += 1
+                continue
 
             # Per-host politeness.
             wait = _MIN_INTERVAL_PER_HOST_SECONDS - (time.monotonic() - last_hit[host])
@@ -273,14 +322,16 @@ def scrape_selected_events(force: bool = False) -> dict:
                 empty += 1
 
     log.info(
-        "scrape done: %d with body, %d empty, %d fetch failure(s)",
+        "scrape done: %d with body, %d empty, %d fetch failure(s), %d paywalled",
         scraped,
         empty,
         failed,
+        paywalled,
     )
     return {
         "pending": len(pending),
         "scraped": scraped,
         "empty": empty,
         "failed": failed,
+        "paywalled": paywalled,
     }

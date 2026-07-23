@@ -295,8 +295,7 @@ def score_event(items: list[ItemView], now: datetime | None = None) -> tuple[flo
 
 
 def _load_rankable_events() -> dict:
-    """
-    Return {event_id: [ItemView, ...]} for every re-rankable event.
+    """Return {event_id: [ItemView, ...]} for every re-rankable event.
 
     Both ``candidate`` and ``selected`` events are rankable so each run can
     re-select from the full pool (and demote stale selections). ``published``
@@ -410,3 +409,4 @@ def rank_events(top_n: int | None = None, now: datetime | None = None) -> dict:
         demoted,
     )
     return {"scored": len(scored), "selected": len(selected_ids), "demoted": demoted}
+

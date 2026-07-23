@@ -12,6 +12,9 @@ from uuid import UUID
 
 import click
 
+# Importing sources triggers registration into the ingest registry.
+# Required for `publish` and any other command that iterates the registry.
+import grounded.ingest.sources  # noqa: F401
 from grounded.agents.runner import build_stories
 
 
@@ -126,6 +129,110 @@ def cmd_edition(include_all: bool, out_path: str | None, to_stdout: bool) -> Non
         out_path = str(out_dir / f"edition-{datetime.now():%Y-%m-%d}.md")
     Path(out_path).write_text(md, encoding="utf-8")
     click.echo(f"wrote {out_path}")
+
+
+@cli.command("publish")
+@click.option("--skip-wipe", is_flag=True, help="Don't wipe DB before running (useful for testing).")
+@click.option("--limit", default=None, type=int, help="Override pipeline top_n.")
+def cmd_publish(skip_wipe: bool, limit: int | None) -> None:
+    """One-shot daily publish: wipe -> ingest -> pipeline -> build -> edition."""
+    import time
+    from datetime import datetime
+    from pathlib import Path
+
+    from grounded.agents.edition import render_edition
+    from grounded.agents.runner import build_stories
+    from grounded.config import settings
+    from grounded.db import cursor
+    from grounded.ingest.base import all_sources, store_raw_items
+    from grounded.pipeline.clustering import build_events
+    from grounded.pipeline.embed import embed_pending
+    from grounded.pipeline.importance import rank_events
+    from grounded.pipeline.scrape import scrape_selected_events
+
+    t0 = time.monotonic()
+
+    # 1. WIPE.
+    if not skip_wipe:
+        click.echo("[publish] wiping DB...")
+        with cursor() as cur:
+            cur.execute(
+                "TRUNCATE raw_items, events, event_items, stories, claims, "
+                "claim_sources CASCADE"
+            )
+
+    # 2. INGEST.
+    click.echo("[publish] ingest...")
+    total_i = total_s = 0
+    for src in all_sources():
+        try:
+            items = list(src.fetch())
+        except Exception as e:
+            click.echo(f"  [{src.name}] fetch error: {e}", err=True)
+            continue
+        if not items:
+            continue
+        ins, sk = store_raw_items(items)
+        total_i += ins
+        total_s += sk
+    click.echo(f"  {total_i} inserted, {total_s} skipped")
+
+    out_dir = Path(settings.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3. PIPELINE (embed + cluster + rank + scrape).
+    click.echo("[publish] embed...")
+    n_emb = embed_pending()
+    click.echo(f"  embedded {n_emb} item(s)")
+
+    click.echo("[publish] cluster...")
+    n_ev = build_events()
+    click.echo(f"  created {n_ev} event(s)")
+
+    click.echo("[publish] rank...")
+    rres = rank_events(top_n=limit)
+    click.echo(
+        f"  scored {rres['scored']}, selected {rres['selected']}, "
+        f"demoted {rres['demoted']}"
+    )
+
+    click.echo("[publish] scrape...")
+    sres = scrape_selected_events()
+    click.echo(
+        f"  scraped {sres['scraped']}, empty {sres['empty']}, "
+        f"failed {sres['failed']} (of {sres['pending']} pending)"
+    )
+
+    # 4. BUILD stories for all selected events.
+    click.echo("[publish] building stories (crew)...")
+    total_top = limit if limit is not None else settings.select_top_n
+    bres = build_stories(limit=total_top)
+    models = ", ".join(f"{r}={n}" for r, n in bres["models"].items())
+    click.echo(f"  models: {models}")
+    click.echo(
+        f"  built {bres['built']} story(ies) from {bres['candidates']} candidate(s): "
+        f"{bres['approved']} approved, {bres['rejected']} rejected, "
+        f"{bres['skipped']} skipped, {bres.get('failed', 0)} failed"
+    )
+
+    # 6.5. DEDUP — catch stories that are the same real-world event framed
+    #      differently, drop the lower-ranked duplicate so the reader doesn't
+    #      see "the same thing in different clothes" twice in one edition.
+    click.echo("[publish] dedup pass...")
+    from grounded.agents.deduper import dedupe_stories
+    dres = dedupe_stories()
+    click.echo(
+        f"  dedup: {dres['pairs_checked']} pair(s) checked, "
+        f"{dres['dropped']} stor(y/ies) dropped"
+    )
+
+    # 7. EDITION.
+    click.echo("[publish] rendering edition...")
+    md = render_edition(approved_only=True)
+    out_path = out_dir / f"edition-{datetime.now():%Y-%m-%d}.md"
+    out_path.write_text(md, encoding="utf-8")
+    elapsed_min = (time.monotonic() - t0) / 60
+    click.echo(f"[publish] wrote {out_path} (total {elapsed_min:.1f} min)")
 
 
 if __name__ == "__main__":

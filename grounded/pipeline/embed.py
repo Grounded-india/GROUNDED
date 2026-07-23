@@ -30,14 +30,16 @@ log = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 1024              # matches raw_items.embedding VECTOR(1024)
 _EMBED_INPUT_CHARS = 2000        # truncate long content before embedding
-# Voyage free tier without a payment method: 3 RPM AND 10K TPM. A large batch
-# (~128 items × ~500 tokens = 64K tokens) violates the TPM cap on a single call.
-# 8 items × ~500 tokens ≈ 4K tokens per call keeps us under the TPM ceiling,
-# and the 21s sleep keeps us under the RPM ceiling. Once a payment method is
-# on file at https://dashboard.voyageai.com/, bump batch to 128 and sleep to 0
-# for full speed - the 200M free tokens still apply.
-_VOYAGE_MAX_BATCH = 8
-_VOYAGE_BATCH_SLEEP_SECONDS = 21.0
+# Voyage paid tier (standard rate limits: 300 RPM / 1M TPM). Runs at full speed.
+# A fresh-run embed of ~500 items completes in ~4 API calls, ~8 seconds total.
+#
+# If you fall back to the free tier without a payment method, Voyage caps
+# accounts at 3 RPM / 10K TPM regardless of model or key. Drop to:
+#     _VOYAGE_MAX_BATCH = 5
+#     _VOYAGE_BATCH_SLEEP_SECONDS = 21.0
+# to stay under both limits sustainably.
+_VOYAGE_MAX_BATCH = 128
+_VOYAGE_BATCH_SLEEP_SECONDS = 0.0
 
 
 def build_embed_text(title: str | None, content: str) -> str:
@@ -113,13 +115,29 @@ class VoyageBackend:
         self._client = voyageai.Client(api_key=settings.voyage_api_key)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        import voyageai.error as _verr
+
         out: list[list[float]] = []
         for i in range(0, len(texts), _VOYAGE_MAX_BATCH):
             if i > 0 and _VOYAGE_BATCH_SLEEP_SECONDS > 0:
                 time.sleep(_VOYAGE_BATCH_SLEEP_SECONDS)
             chunk = texts[i : i + _VOYAGE_MAX_BATCH]
-            resp = self._client.embed(chunk, model=self.model, input_type="document")
-            out.extend(resp.embeddings)
+            # Retry transient network errors so one flaky call doesn't nuke
+            # an hour-long publish. Rate-limit / auth errors are NOT retried.
+            last_err: Exception | None = None
+            for attempt in range(3):
+                try:
+                    resp = self._client.embed(chunk, model=self.model, input_type="document")
+                    out.extend(resp.embeddings)
+                    break
+                except (_verr.APIConnectionError, _verr.Timeout) as e:
+                    last_err = e
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    log.warning("voyage embed transient error (attempt %d/3): %s — sleeping %ds",
+                                attempt + 1, e, wait)
+                    time.sleep(wait)
+            else:
+                raise last_err  # type: ignore[misc]
         return out
 
 
@@ -136,23 +154,44 @@ def get_backend() -> EmbeddingBackend:
     raise ValueError(f"unknown embedding backend: {settings.embedding_backend!r}")
 
 
-def embed_pending(batch_size: int = 128, limit: int | None = None) -> int:
+def embed_pending(
+    batch_size: int = 128,
+    limit: int | None = None,
+    source_names: list[str] | None = None,
+) -> int:
     """
     Embed every raw_item that doesn't have an embedding yet.
+
+    If ``source_names`` is given, only items from those sources are embedded.
+    Used to split main-pipeline and deep-dive-pipeline embedding across two
+    concurrent processes: they touch disjoint rows, so no race, and one
+    Voyage timeout in one process no longer kills both flows.
 
     Returns the number of items embedded.
     """
     with cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, title, content
-            FROM raw_items
-            WHERE embedding IS NULL
-            ORDER BY fetched_at
-            LIMIT %s
-            """,
-            (limit if limit is not None else 1_000_000,),
-        )
+        if source_names:
+            cur.execute(
+                """
+                SELECT id, title, content
+                FROM raw_items
+                WHERE embedding IS NULL AND source_name = ANY(%s)
+                ORDER BY fetched_at
+                LIMIT %s
+                """,
+                (list(source_names), limit if limit is not None else 1_000_000),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, title, content
+                FROM raw_items
+                WHERE embedding IS NULL
+                ORDER BY fetched_at
+                LIMIT %s
+                """,
+                (limit if limit is not None else 1_000_000,),
+            )
         rows = cur.fetchall()
 
     if not rows:

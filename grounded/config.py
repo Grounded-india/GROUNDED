@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     cluster_similarity: float = Field(default=0.80, alias="CLUSTER_SIMILARITY")
     cluster_window_hours: float = Field(default=48.0, alias="CLUSTER_WINDOW_HOURS")
 
-    # How many top events advance to Layer 3 per ranking run.
-    select_top_n: int = Field(default=30, alias="SELECT_TOP_N")
+    # How many top MAIN events advance to Layer 3 per ranking run.
+    # The daily edition renders these under "## Today".
+    select_top_n: int = Field(default=12, alias="SELECT_TOP_N")
 
     def has_voyage_key(self) -> bool:
         key = (self.voyage_api_key or "").strip()
