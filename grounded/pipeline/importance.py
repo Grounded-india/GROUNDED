@@ -272,8 +272,16 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
     ):
         score -= 1.5
 
-    # Recency: linear decay to zero across the window.
-    score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)
+    # Recency: ground-reality stories get a much bigger boost and a tighter
+    # window (24h) — a 4h-old protest should crush a 20h-old one of similar
+    # coverage. Non-ground-reality (analysis, business, policy) keeps the
+    # gentler original 48h/1.0 curve.
+    if f.ground_reality_hits >= 1:
+        if f.recency_hours <= 24.0:
+            score += 3.0 * (1.0 - f.recency_hours / 24.0)
+        # older than 24h: no recency bonus, but still eligible via other signals
+    else:
+        score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)
 
     # --- downweights: what makes the ranker resistant to being gamed ---
     score -= min(f.downweight_hits, 6) * 0.7

@@ -176,6 +176,17 @@ def build_story(event: EventView, docs: list[SourceDoc], backend=None) -> StoryP
     per_be = router.for_role("perspective")
     ed_be = router.for_role("editor")
 
+    # Enrichment: for ground-reality events, look for topically-close primary
+    # items (PIB, PMO, courts, RBI) not already in this cluster and attach
+    # them as "-response" SourceDocs so the story surfaces the official reply
+    # alongside the ground reality. Cheap pgvector similarity query. If the
+    # event isn't ground-reality (no controversy keywords in any doc), the
+    # enrichment call is skipped entirely — no cost, no change.
+    if _count_controversy_hits(docs) >= 1:
+        from grounded.agents.enrichment import attach_government_response
+
+        docs = attach_government_response(event, docs)
+
     has_primary = any(d.is_primary for d in docs)
     # Two-stage decision: cheap keyword pre-filter (drops obvious reports),
     # then LLM validator (checks the survivors for substantive opposing sides).
