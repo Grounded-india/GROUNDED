@@ -102,11 +102,20 @@ def cluster_items(
     return sorted((sorted(g) for g in groups.values()), key=lambda g: g[0])
 
 
-def _load_unclustered_items() -> list[dict]:
-    """Fetch embedded raw_items that are not yet attached to any event."""
+def _load_unclustered_items(source_names: list[str] | None = None) -> list[dict]:
+    """Fetch embedded raw_items that are not yet attached to any event.
+
+    Optional ``source_names`` restricts the query to items from a specific set
+    of sources.
+    """
+    where_extra = ""
+    params: tuple = ()
+    if source_names:
+        where_extra = "AND r.source_name = ANY(%s)"
+        params = (list(source_names),)
     with cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT r.id,
                    r.source_name,
                    r.source_tier,
@@ -118,8 +127,10 @@ def _load_unclustered_items() -> list[dict]:
             LEFT JOIN event_items ei ON ei.raw_item_id = r.id
             WHERE r.embedding IS NOT NULL
               AND ei.raw_item_id IS NULL
+              {where_extra}
             ORDER BY ts
-            """
+            """,
+            params,
         )
         return cur.fetchall()
 
@@ -135,9 +146,9 @@ def _pick_representative(rows: list[dict]) -> dict:
 def build_events(
     similarity_threshold: float | None = None,
     time_window_hours: float | None = None,
+    source_names: list[str] | None = None,
 ) -> int:
-    """
-    Cluster all un-clustered embedded items into events and persist them.
+    """Cluster un-clustered embedded items into events and persist them.
 
     Idempotent: items already attached to an event are skipped, so re-running
     only clusters newly-embedded items. Returns the number of events created.
@@ -149,7 +160,7 @@ def build_events(
         settings.cluster_window_hours if time_window_hours is None else time_window_hours
     )
 
-    rows = _load_unclustered_items()
+    rows = _load_unclustered_items(source_names=source_names)
     if not rows:
         log.info("no un-clustered embedded items")
         return 0
@@ -176,7 +187,8 @@ def build_events(
             cur.execute(
                 """
                 INSERT INTO events
-                    (title, summary, tier_1_anchor, first_seen_at, last_seen_at, status)
+                    (title, summary, tier_1_anchor,
+                     first_seen_at, last_seen_at, status)
                 VALUES (%s, %s, %s, %s, %s, 'candidate')
                 RETURNING id
                 """,

@@ -11,7 +11,11 @@ Deterministic gate first, Gemini second (and only to make things stricter):
     - ``unsupported`` (no direct conflict, just not clearly backed): cut subject to
       anti-over-pruning caps so a borderline model call cannot gut a story.
 * Approval rule depends on the story mode:
-    - ``report``  : needs >= 1 verified claim (primary-anchored or corroborated).
+    - ``report``  : needs >= 1 GROUNDED claim (traceable to a source, not
+                    hallucinated). Cross-source "verified" status is a
+                    quality signal shown to the reader but NOT an approval
+                    gate — a single-source Indian Express or Newslaundry
+                    piece is still worth publishing.
     - ``debate``  : ground-reality event with no primary source; approved when it
                     has >= 1 grounded point and presented as a two-sided debate
                     rather than rejected.
@@ -240,7 +244,9 @@ def audit_and_assemble(
     if mode == "debate":
         approved = len(grounded) >= 1
     else:
-        approved = len(verified) >= MIN_VERIFIED_CLAIMS
+        # REPORT approves on GROUNDED, not verified. See module docstring.
+        # Cross-source verification is shown as a quality signal, not a gate.
+        approved = len(grounded) >= MIN_VERIFIED_CLAIMS
 
     notes: list[str] = [f"mode={mode}"]
     if dropped:
@@ -252,12 +258,14 @@ def audit_and_assemble(
             notes.append("rejected: no grounded points to debate")
     else:
         if flagged:
-            notes.append(f"{len(flagged)} claim(s) flagged single-source/unverified")
-        notes.append(
-            f"approved on {len(verified)} verified claim(s)"
-            if approved
-            else "rejected: no claim cleared verification"
-        )
+            notes.append(f"{len(flagged)} claim(s) single-source (kept, marked)")
+        if approved:
+            notes.append(
+                f"approved on {len(grounded)} grounded claim(s) "
+                f"({len(verified)} cross-source verified)"
+            )
+        else:
+            notes.append("rejected: no grounded claims survived hallucination audit")
 
     # Headline / dek: deterministic by default; Gemini-polished when available.
     headline = event.title
