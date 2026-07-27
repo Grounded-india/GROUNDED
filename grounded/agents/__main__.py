@@ -131,10 +131,43 @@ def cmd_edition(include_all: bool, out_path: str | None, to_stdout: bool) -> Non
     click.echo(f"wrote {out_path}")
 
 
+def _default_site_dir() -> "Path":
+    """Sibling ``grounded-page`` repo, overridable via GROUNDED_PAGE_DIR."""
+    import os
+    from pathlib import Path
+
+    override = os.environ.get("GROUNDED_PAGE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path(__file__).resolve().parents[2] / "grounded-page").resolve()
+
+
+def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
+    import shutil
+    from pathlib import Path
+
+    site_root = site_dir if site_dir is not None else _default_site_dir()
+    if not site_root.is_dir():
+        click.echo(
+            f"[publish] grounded-page not found at {site_root}\n"
+            "          set GROUNDED_PAGE_DIR or pass --site /path/to/grounded-page\n"
+            "          (edition was still written to output/)",
+            err=True,
+        )
+        return
+    dest_dir = site_root / "content" / "editions"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / out_path.name
+    shutil.copy2(out_path, dest)
+    click.echo(f"[publish] copied → {dest}")
+
+
 @cli.command("publish")
 @click.option("--skip-wipe", is_flag=True, help="Don't wipe DB before running (useful for testing).")
 @click.option("--limit", default=None, type=int, help="Override pipeline top_n.")
-def cmd_publish(skip_wipe: bool, limit: int | None) -> None:
+@click.option("--no-site", is_flag=True, help="Skip copying the edition into grounded-page.")
+@click.option("--site", "site_dir", default=None, help="Override path to the grounded-page repo.")
+def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str | None) -> None:
     """One-shot daily publish: wipe -> ingest -> pipeline -> build -> edition."""
     import time
     from datetime import datetime
@@ -233,6 +266,10 @@ def cmd_publish(skip_wipe: bool, limit: int | None) -> None:
     out_path.write_text(md, encoding="utf-8")
     elapsed_min = (time.monotonic() - t0) / 60
     click.echo(f"[publish] wrote {out_path} (total {elapsed_min:.1f} min)")
+
+    if not no_site:
+        site = Path(site_dir).expanduser().resolve() if site_dir else None
+        _copy_edition_to_site(out_path, site)
 
 
 if __name__ == "__main__":
