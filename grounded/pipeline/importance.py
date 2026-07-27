@@ -359,6 +359,43 @@ def select_event_ids(
     return [eid for eid, _ in eligible[:top_n]]
 
 
+def promote_next_candidates(n: int) -> list:
+    """Flip the next ``n`` best-scoring CANDIDATE events to SELECTED and return
+    their ids. Used by the publish top-up loop when dedup leaves fewer approved
+    stories than the target floor.
+
+    Only events with ``tier_1_anchor = TRUE`` and ``importance_score > 0`` are
+    eligible — same gate as ``select_event_ids`` uses for the initial cut.
+    Idempotent within a single publish run: candidates that get promoted here
+    will not be re-considered by a subsequent call (they are no longer
+    CANDIDATE).
+    """
+    if n <= 0:
+        return []
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+            FROM events
+            WHERE status = %s
+              AND tier_1_anchor = TRUE
+              AND importance_score > 0
+            ORDER BY importance_score DESC, id
+            LIMIT %s
+            """,
+            (EventStatus.CANDIDATE, n),
+        )
+        ids = [r["id"] for r in cur.fetchall()]
+        if not ids:
+            return []
+        cur.execute(
+            "UPDATE events SET status = %s WHERE id = ANY(%s)",
+            (EventStatus.SELECTED, ids),
+        )
+    log.info("top-up: promoted %d candidate event(s) to SELECTED", len(ids))
+    return ids
+
+
 def rank_events(top_n: int | None = None, now: datetime | None = None) -> dict:
     """
     Score every re-rankable event, persist scores, and re-select the top events

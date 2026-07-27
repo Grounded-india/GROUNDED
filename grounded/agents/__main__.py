@@ -203,7 +203,16 @@ def cmd_publish(skip_wipe: bool, limit: int | None) -> None:
         f"failed {sres['failed']} (of {sres['pending']} pending)"
     )
 
-    # 4. BUILD stories for all selected events.
+    # 4. BUILD + DEDUP with top-up loop.
+    #
+    # Publish target: at least ``min_final_stories`` approved stories in the
+    # final edition. If build+dedup leaves fewer, promote the next best-scoring
+    # candidate events and repeat scrape+build+dedup. Bounded to 3 top-up
+    # passes so a genuinely thin news day doesn't stall the pipeline.
+    from grounded.agents.deduper import dedupe_stories
+    from grounded.pipeline.importance import promote_next_candidates
+
+    target = settings.min_final_stories
     click.echo("[publish] building stories (crew)...")
     total_top = limit if limit is not None else settings.select_top_n
     bres = build_stories(limit=total_top)
@@ -215,16 +224,61 @@ def cmd_publish(skip_wipe: bool, limit: int | None) -> None:
         f"{bres['skipped']} skipped, {bres.get('failed', 0)} failed"
     )
 
-    # 6.5. DEDUP — catch stories that are the same real-world event framed
-    #      differently, drop the lower-ranked duplicate so the reader doesn't
-    #      see "the same thing in different clothes" twice in one edition.
     click.echo("[publish] dedup pass...")
-    from grounded.agents.deduper import dedupe_stories
     dres = dedupe_stories()
     click.echo(
         f"  dedup: {dres['pairs_checked']} pair(s) checked, "
         f"{dres['dropped']} stor(y/ies) dropped"
     )
+
+    def _approved_count() -> int:
+        with cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM stories WHERE editor_approved = TRUE")
+            return int(cur.fetchone()["c"])
+
+    for attempt in range(1, 4):
+        approved_now = _approved_count()
+        if approved_now >= target:
+            click.echo(
+                f"[publish] approved={approved_now} >= target={target}; done topping up"
+            )
+            break
+        deficit = target - approved_now
+        # Overshoot the deficit — some new stories will be rejected by the
+        # editor or dropped by dedup. Cap so we don't runaway on a thin day.
+        batch = min(max(deficit * 2, 5), 15)
+        click.echo(
+            f"[publish] top-up pass {attempt}: approved={approved_now} < {target}; "
+            f"promoting {batch} more candidate event(s)..."
+        )
+        promoted = promote_next_candidates(batch)
+        if not promoted:
+            click.echo("  no more eligible candidates; stopping top-up")
+            break
+
+        click.echo("[publish] scrape (top-up)...")
+        sres = scrape_selected_events()
+        click.echo(
+            f"  scraped {sres['scraped']}, empty {sres['empty']}, "
+            f"failed {sres['failed']} (of {sres['pending']} pending)"
+        )
+        click.echo("[publish] build (top-up)...")
+        bres = build_stories()  # picks up SELECTED events without stories
+        click.echo(
+            f"  built {bres['built']}: {bres['approved']} approved, "
+            f"{bres['rejected']} rejected, {bres['skipped']} skipped, "
+            f"{bres.get('failed', 0)} failed"
+        )
+        click.echo("[publish] dedup (top-up)...")
+        dres = dedupe_stories()
+        click.echo(
+            f"  dedup: {dres['pairs_checked']} pair(s) checked, "
+            f"{dres['dropped']} stor(y/ies) dropped"
+        )
+    else:
+        click.echo(
+            f"[publish] top-up cap reached (3 passes); approved={_approved_count()}"
+        )
 
     # 7. EDITION.
     click.echo("[publish] rendering edition...")
