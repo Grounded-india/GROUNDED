@@ -56,6 +56,8 @@ _MIN_WIDTH = 300
 _MIN_HEIGHT = 200
 
 # Substrings in image URLs that almost always indicate a non-content asset.
+# These are sidebar / recirculation / greeting-graphic patterns that leaked
+# through as "lead images" in the first 07-29 run — see task #55.
 _URL_BLOCKLIST = (
     "/logo", "logo.", "logo-", "-logo",
     "/favicon", "favicon.",
@@ -64,6 +66,15 @@ _URL_BLOCKLIST = (
     "1x1.", "pixel.", "beacon",
     "avatar",
     "/subscribe", "/paywall",
+    # Recirculation / greeting cards / promo graphics — these are almost never
+    # the actual news photo. Extend as new patterns are seen.
+    "wishes", "greeting", "guru-purnima", "happy-",
+    "download-app", "app-download",
+    "readwhere", "loader.gif",
+    "creativecommons", "licensebuttons",
+    "youtube.com/vi/", "img.youtube.com",  # video thumbnails from embeds
+    "scorecardresearch", "score-card",
+    "cdn.publive.online/fit-in/1200x675/",  # publive placeholder banner
 )
 
 # Fallback-search image blocklist for domains that block hotlinking or serve junk.
@@ -159,22 +170,44 @@ def _pick_from_srcset(srcset: str) -> str | None:
     return best_url
 
 
+def _looks_like_url(text: str) -> bool:
+    """A caption that is itself a URL means we grabbed the img src as alt text —
+    a classic sidebar/hotlink-block giveaway. Reject those upstream."""
+    s = (text or "").strip().lower()
+    return s.startswith(("http://", "https://", "//")) or "images.indianexpress.com" in s
+
+
 def _closest_caption(img_tag) -> str:
-    """Pull a caption from figure/figcaption or img alt/title, in that order."""
+    """Pull a caption from figure/figcaption or img alt/title, in that order.
+    Return "" for URL-shaped captions so they never render."""
     fig = img_tag.find_parent("figure")
     if fig is not None:
         cap = fig.find("figcaption")
         if cap is not None:
             text = cap.get_text(" ", strip=True)
-            if text:
+            if text and not _looks_like_url(text):
                 return text[:300]
     alt = (img_tag.get("alt") or "").strip()
-    if alt:
+    if alt and not _looks_like_url(alt):
         return alt[:300]
     title = (img_tag.get("title") or "").strip()
-    if title:
+    if title and not _looks_like_url(title):
         return title[:300]
     return ""
+
+
+# CSS selectors that identify the actual article body — where the real photos
+# live. Everything outside these containers is sidebar/recirculation/related.
+# Ordered by specificity; the first hit wins.
+_ARTICLE_CONTAINER_SELECTORS = (
+    "article",
+    "main",
+    '[role="main"]',
+    '[itemprop="articleBody"]',
+    ".article-body", ".story-body", ".story__body",
+    ".entry-content", ".post-content",
+    "#story-content", "#article-content",
+)
 
 
 def extract_image_candidates(
@@ -206,7 +239,18 @@ def extract_image_candidates(
     if lead is not None:
         candidates.append(lead)
 
-    for idx, img in enumerate(soup.find_all("img")):
+    # Restrict the img walk to the article body if we can find one — otherwise
+    # fall back to the whole document. This keeps sidebar / "you might also
+    # like" / promo thumbnails out of the candidate pool.
+    body_scope = None
+    for sel in _ARTICLE_CONTAINER_SELECTORS:
+        body_scope = soup.select_one(sel)
+        if body_scope is not None:
+            break
+    scope = body_scope or soup
+    in_body = body_scope is not None
+
+    for idx, img in enumerate(scope.find_all("img")):
         src = (
             img.get("src")
             or img.get("data-src")
@@ -234,8 +278,11 @@ def extract_image_candidates(
             continue
 
         # Score: earlier in doc = more likely lead. Bigger = better.
-        # Caption/alt presence is a strong positive.
+        # Caption/alt presence is a strong positive. Article-body scoping
+        # earns a big base bonus so those beat any stray fall-back images.
         score = 10.0
+        if in_body:
+            score += 15.0
         score -= min(idx, 20) * 0.3          # position penalty
         score += (w or 0) * 0.001            # size bonus (small weight)
         score += (h or 0) * 0.001
@@ -492,6 +539,10 @@ def enrich_stories_with_images(
     primary_hits = 0
     fallback_hits = 0
     with_images = 0
+    # Cross-story dedup: any image URL reused across stories is almost always
+    # a sidebar / "you might also like" / recirculation module thumbnail. Skip
+    # it on the second and subsequent stories so it never appears twice.
+    used_urls: set[str] = set()
 
     with make_client() as client:
         for story in stories:
@@ -517,16 +568,19 @@ def enrich_stories_with_images(
                     source_of = "fallback"
 
             all_candidates.sort(key=lambda c: c.score, reverse=True)
-            # Deduplicate by URL.
-            seen: set[str] = set()
+            # Per-story dedup + cross-story dedup in one pass.
+            seen_here: set[str] = set()
             unique: list[ImageCandidate] = []
             for c in all_candidates:
-                if c.url in seen:
+                if c.url in seen_here or c.url in used_urls:
                     continue
-                seen.add(c.url)
+                seen_here.add(c.url)
                 unique.append(c)
                 if len(unique) >= _MAX_PER_STORY:
                     break
+            # Record the URLs actually kept so future stories can't reuse them.
+            for c in unique:
+                used_urls.add(c.url)
 
             if not unique:
                 log.info("no images found for story %s (%s)", story_id, headline[:60])
@@ -596,3 +650,210 @@ def load_story_images(story_id: UUID) -> list[dict]:
             (story_id,),
         )
         return list(cur.fetchall())
+
+
+# ---------------------------------------------------------------------------
+# LLM verify + recaption pass (Gemini vision)
+# ---------------------------------------------------------------------------
+
+_VERIFY_SYSTEM = (
+    "You are a photo editor for a fact-driven Indian news newsletter. For each "
+    "image supplied, decide whether it is a RELEVANT illustration for the given "
+    "story, and write a clean one-sentence caption grounded in what the image "
+    "actually shows plus the story context.\n"
+    "\n"
+    "RELEVANCE RULES\n"
+    "- KEEP if the image plausibly illustrates the story: the same event, the "
+    "person named, the institution, the place, the theme (protest / court / "
+    "parliament / flood / stadium / etc). File photos of the right subject are "
+    "fine. Old photos of the right subject are fine.\n"
+    "- DROP if the image is a greeting card, a promo/download banner, a "
+    "sidebar/related-article thumbnail, a logo, a person or subject unrelated "
+    "to the story, or generic stock unrelated to the topic.\n"
+    "- When unsure, KEEP — a plausibly-relevant photo is better than none.\n"
+    "\n"
+    "CAPTION RULES\n"
+    "- One sentence, factual, no hype, no adjectives that pick a side.\n"
+    "- Describe what is actually visible AND connect it to the story where the "
+    "sources allow. Do not invent names, dates, or events not visible or in the "
+    "story context.\n"
+    "- If the caption you were given is already clean and accurate, you may "
+    "keep it. If it is a URL, empty, or misleading, rewrite it.\n"
+    "- Max 200 characters. No trailing period required.\n"
+    "\n"
+    "Respond only with JSON."
+)
+
+
+def _load_all_images_by_story() -> dict[UUID, list[dict]]:
+    """Fetch every story_images row grouped by story_id, joined with headline+dek."""
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT si.id AS image_id, si.story_id, si.source_url, si.local_path,
+                   si.caption, si.credit, si.article_url, si.ordinal,
+                   s.headline, s.dek
+            FROM story_images si
+            JOIN stories s ON s.id = si.story_id
+            WHERE s.editor_approved = TRUE
+            ORDER BY si.story_id, si.ordinal
+            """
+        )
+        rows = list(cur.fetchall())
+    grouped: dict[UUID, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r["story_id"], []).append(r)
+    return grouped
+
+
+def _apply_verdicts(
+    verdicts: list[dict],
+) -> tuple[int, int]:
+    """Given LLM output [{image_id, verdict, caption}, ...], apply to DB.
+
+    Returns (dropped, recaptioned) counts.
+    """
+    dropped = 0
+    recaptioned = 0
+    with cursor() as cur:
+        for v in verdicts:
+            image_id = v.get("image_id")
+            if not image_id:
+                continue
+            verdict = str(v.get("verdict") or "").upper()
+            if verdict == "DROP":
+                cur.execute("DELETE FROM story_images WHERE id = %s", (image_id,))
+                dropped += 1
+            elif verdict == "KEEP":
+                new_caption = (v.get("caption") or "").strip()[:400]
+                if new_caption:
+                    cur.execute(
+                        "UPDATE story_images SET caption = %s WHERE id = %s",
+                        (new_caption, image_id),
+                    )
+                    recaptioned += 1
+    # Re-pack ordinal per story so gaps left by drops don't confuse the
+    # renderer (which uses ordinal to pick "lead" = ordinal 0).
+    with cursor() as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT id,
+                       row_number() OVER (PARTITION BY story_id ORDER BY ordinal) - 1 AS new_ord
+                FROM story_images
+            )
+            UPDATE story_images si
+            SET ordinal = ranked.new_ord
+            FROM ranked
+            WHERE si.id = ranked.id
+              AND si.ordinal <> ranked.new_ord
+            """
+        )
+    return dropped, recaptioned
+
+
+def verify_and_recaption_images() -> dict:
+    """Vision-based final gate over story_images.
+
+    For every approved story, send its images (as URLs) to Gemini along with
+    the headline and dek. Gemini returns per-image KEEP/DROP + a clean
+    one-sentence caption. Dropped rows are deleted, kept rows get their
+    caption rewritten, and ordinals are compacted.
+
+    Requires GEMINI_API_KEY. If Gemini is unavailable, returns a no-op summary.
+    """
+    from grounded.agents.llm import extract_json, make_gemini
+
+    backend = make_gemini()
+    if backend is None or getattr(backend, "is_local", False):
+        log.warning("verify_and_recaption_images: no Gemini backend; skipping")
+        return {"stories": 0, "images_checked": 0, "dropped": 0, "recaptioned": 0}
+
+    grouped = _load_all_images_by_story()
+    total_dropped = 0
+    total_recaptioned = 0
+    total_checked = 0
+
+    for story_id, imgs in grouped.items():
+        if not imgs:
+            continue
+        headline = imgs[0]["headline"] or ""
+        dek = imgs[0]["dek"] or ""
+        image_block = "\n".join(
+            f"- id={r['image_id']}, url={r['source_url']}, "
+            f"current_caption={r['caption'] or '(none)'}, "
+            f"article={r['article_url'] or '(none)'}"
+            for r in imgs
+        )
+        user = (
+            f"STORY HEADLINE: {headline}\n"
+            f"STORY DEK: {dek}\n\n"
+            f"IMAGES TO REVIEW:\n{image_block}\n\n"
+            'Return JSON: {"verdicts": [{"image_id": "<id>", "verdict": "KEEP" | "DROP", "caption": "<one-sentence caption if KEEP>"}]}'
+        )
+        try:
+            raw = _vision_complete_gemini(backend, _VERIFY_SYSTEM, user, [r["source_url"] for r in imgs])
+            data = extract_json(raw)
+        except Exception as e:
+            log.warning("image verify failed for story %s: %s", headline[:60], e)
+            continue
+
+        verdicts = data.get("verdicts") if isinstance(data, dict) else None
+        if not isinstance(verdicts, list):
+            log.warning("image verify: unexpected response shape for %s", headline[:60])
+            continue
+
+        # Coerce image_id strings back to UUIDs the DB layer expects.
+        cleaned = []
+        for v in verdicts:
+            if not isinstance(v, dict):
+                continue
+            try:
+                v["image_id"] = UUID(str(v.get("image_id")))
+            except (ValueError, TypeError):
+                continue
+            cleaned.append(v)
+
+        dropped, recaptioned = _apply_verdicts(cleaned)
+        total_dropped += dropped
+        total_recaptioned += recaptioned
+        total_checked += len(imgs)
+        log.info(
+            "story %s: reviewed %d, dropped %d, recaptioned %d",
+            headline[:60], len(imgs), dropped, recaptioned,
+        )
+
+    return {
+        "stories": len(grouped),
+        "images_checked": total_checked,
+        "dropped": total_dropped,
+        "recaptioned": total_recaptioned,
+    }
+
+
+def _vision_complete_gemini(
+    backend, system: str, user_text: str, image_urls: list[str]
+) -> str:
+    """Send a multimodal request to the Gemini OpenAI-compatible endpoint.
+
+    Bypasses ``OpenAICompatibleBackend.complete`` because it only supports
+    text-in/text-out; the underlying OpenAI() client on the backend supports
+    the multimodal message shape natively.
+    """
+    content: list[dict] = [{"type": "text", "text": user_text}]
+    for url in image_urls[:6]:  # bound the request
+        if not url:
+            continue
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    kwargs = {"response_format": {"type": "json_object"}}
+    resp = backend._client.chat.completions.create(  # noqa: SLF001 — private access for vision
+        model=backend.model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ],
+        max_tokens=2000,
+        temperature=0.1,
+        **kwargs,
+    )
+    return (resp.choices[0].message.content or "").strip()
