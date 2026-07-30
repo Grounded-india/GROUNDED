@@ -224,6 +224,81 @@ def cmd_enrich(
         _copy_edition_to_site(Path(out_path), site)
 
 
+@cli.command("coherence")
+@click.option(
+    "--date",
+    "edition_date",
+    default=None,
+    help="Edition date in YYYY-MM-DD (defaults to today). Used only to name "
+    "the output file; the DB state is not filtered by date.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Output file path (defaults to OUTPUT_DIR/edition-<date>.md).",
+)
+@click.option(
+    "--no-render",
+    is_flag=True,
+    help="Skip re-rendering the edition file (only mutate the DB).",
+)
+@click.option(
+    "--no-site",
+    is_flag=True,
+    help="Skip copying the edition into grounded-page.",
+)
+@click.option(
+    "--site",
+    "site_dir",
+    default=None,
+    help="Override path to the grounded-page repo.",
+)
+def cmd_coherence(
+    edition_date: str | None,
+    out_path: str | None,
+    no_render: bool,
+    no_site: bool,
+    site_dir: str | None,
+) -> None:
+    """Run the coherence check + repair pass over currently-approved stories
+    and re-render the edition file. Does not wipe the DB or rebuild stories."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from grounded.agents.coherence import check_and_repair_coherence
+    from grounded.agents.edition import render_edition
+    from grounded.config import settings
+
+    if edition_date is None:
+        edition_date = datetime.now().strftime("%Y-%m-%d")
+
+    out_dir = Path(settings.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    click.echo("[coherence] checking headline/dek vs body for every approved story...")
+    cres = check_and_repair_coherence()
+    click.echo(
+        f"  coherence: {cres['coherent']}/{cres['stories']} coherent, "
+        f"{cres['rewritten']} rewritten, {cres['dropped']} dropped, "
+        f"{cres['errors']} error(s)"
+    )
+
+    if no_render:
+        return
+
+    click.echo("[coherence] rendering edition...")
+    md = render_edition(approved_only=True)
+    if out_path is None:
+        out_path = str(out_dir / f"edition-{edition_date}.md")
+    Path(out_path).write_text(md, encoding="utf-8")
+    click.echo(f"[coherence] wrote {out_path}")
+
+    if not no_site:
+        site = Path(site_dir).expanduser().resolve() if site_dir else None
+        _copy_edition_to_site(Path(out_path), site)
+
+
 @cli.command("publish")
 @click.option("--skip-wipe", is_flag=True, help="Don't wipe DB before running (useful for testing).")
 @click.option("--limit", default=None, type=int, help="Override pipeline top_n.")
@@ -378,6 +453,19 @@ def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str
         click.echo(
             f"[publish] top-up cap reached (3 passes); approved={_approved_count()}"
         )
+
+    # 6b. COHERENCE — catch stories where the headline no longer describes
+    # the body (Layer-2 clustering can merge two events; the reporter writes
+    # from one, the title comes from the other). Rewrites where possible,
+    # drops where the body itself is a mix.
+    click.echo("[publish] coherence check...")
+    from grounded.agents.coherence import check_and_repair_coherence
+    cres = check_and_repair_coherence()
+    click.echo(
+        f"  coherence: {cres['coherent']}/{cres['stories']} coherent, "
+        f"{cres['rewritten']} rewritten, {cres['dropped']} dropped, "
+        f"{cres['errors']} error(s)"
+    )
 
     # 7. EDITION.
     click.echo("[publish] rendering edition...")

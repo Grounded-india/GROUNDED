@@ -138,6 +138,23 @@ def _url_is_junk(url: str) -> bool:
     return False
 
 
+def _normalize_image_url(url: str) -> str:
+    """Return a dedup key that treats size/quality variants of the same image
+    as one. Publishers serve the same photo at many URLs: ``photo.jpg``,
+    ``photo.jpg?w=1024``, ``photo.jpg?resize=450,253``, ``photo.jpg?quality=80``.
+    A plain URL-string dedup misses these. We strip the query string entirely
+    (all image CDNs use it for resize/quality/format, not for identity),
+    lower-case the host, and drop trailing slashes."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return url.lower()
+    host = (p.hostname or "").lower()
+    port = f":{p.port}" if p.port else ""
+    path = p.path.rstrip("/")
+    return f"{p.scheme.lower()}://{host}{port}{path}"
+
+
 def _pick_from_srcset(srcset: str) -> str | None:
     """Pick the largest URL from a srcset attribute."""
     best_url = None
@@ -517,13 +534,15 @@ def enrich_stories_with_images(
                     source_of = "fallback"
 
             all_candidates.sort(key=lambda c: c.score, reverse=True)
-            # Deduplicate by URL.
+            # Deduplicate by NORMALIZED URL so /photo.jpg and /photo.jpg?w=1024
+            # count as one image (they are, at different sizes).
             seen: set[str] = set()
             unique: list[ImageCandidate] = []
             for c in all_candidates:
-                if c.url in seen:
+                key = _normalize_image_url(c.url)
+                if key in seen:
                     continue
-                seen.add(c.url)
+                seen.add(key)
                 unique.append(c)
                 if len(unique) >= _MAX_PER_STORY:
                     break
