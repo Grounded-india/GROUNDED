@@ -615,3 +615,237 @@ def load_story_images(story_id: UUID) -> list[dict]:
             (story_id,),
         )
         return list(cur.fetchall())
+
+
+# ---------------------------------------------------------------------------
+# Gemini vision verify + dedup + recaption
+# ---------------------------------------------------------------------------
+
+# Sleep between Gemini calls to stay under the 15 req/min free-tier ceiling.
+# ~20 stories with 2-3 images each is ~20 requests; 4.5s spacing keeps us safe.
+_VERIFY_SLEEP_SECONDS = 4.5
+
+# Body chars sent to the LLM alongside the images. Enough for the LLM to
+# understand what the story is actually about (the opening lede + first few
+# paragraphs) without paying for every extra token. This is the CRITICAL fix
+# from the previous verify pass, which only saw the headline+dek and dropped
+# body-relevant images that didn't match the (sometimes wrong) headline.
+_VERIFY_BODY_CHARS = 2000
+
+
+_IMAGE_VERIFY_SYSTEM = (
+    "You are a photo editor for a fact-driven Indian news newsletter. You are "
+    "shown a story (headline, dek, body) and a set of candidate images. For "
+    "each image you must do three things:\n"
+    "\n"
+    "1. RELEVANCE — decide KEEP or DROP.\n"
+    "   - KEEP if the image plausibly illustrates the story: same event, same "
+    "person, same institution, same place, or the same theme (protest / court "
+    "/ parliament / flood / stadium / market / etc). File photos and old "
+    "photos of the right subject are fine. Judge relevance against the STORY "
+    "BODY, not just the headline — the body is what the article actually "
+    "reports on.\n"
+    "   - DROP only if the image is clearly unrelated: a greeting card, a "
+    "promo/download banner, a sidebar thumbnail, a person or subject not in "
+    "the story at all. When unsure, KEEP.\n"
+    "\n"
+    "2. DUPLICATE DETECTION — for each image, if it is a VISUAL duplicate of "
+    "another image in this set (same photo at a different size, near-identical "
+    "framing, obvious stock re-use), record the id of the FIRST duplicate you "
+    "see it match. Only one image per duplicate group should survive; the rest "
+    "get DROP with `duplicate_of` set. If not a duplicate, `duplicate_of` is "
+    "null.\n"
+    "\n"
+    "3. CAPTION — write one clean sentence (max 200 chars) that describes what "
+    "the image actually shows AND ties it to the story. Do not invent names, "
+    "dates, or events not visible or in the body. If the given caption is "
+    "already clean and accurate, keep it.\n"
+    "\n"
+    "Respond only with JSON."
+)
+
+
+def _load_all_images_with_body() -> dict:
+    """story_id -> {headline, dek, body_markdown, images: [row, ...]}."""
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT si.id AS image_id, si.story_id, si.source_url, si.local_path,
+                   si.caption, si.credit, si.article_url, si.ordinal,
+                   s.headline, s.dek, s.body_markdown
+            FROM story_images si
+            JOIN stories s ON s.id = si.story_id
+            WHERE s.editor_approved = TRUE
+            ORDER BY si.story_id, si.ordinal
+            """
+        )
+        rows = list(cur.fetchall())
+    grouped: dict = {}
+    for r in rows:
+        bucket = grouped.setdefault(r["story_id"], {
+            "headline": r["headline"] or "",
+            "dek": r["dek"] or "",
+            "body": r["body_markdown"] or "",
+            "images": [],
+        })
+        bucket["images"].append(r)
+    return grouped
+
+
+def _vision_verify_gemini(
+    backend, system: str, user_text: str, image_urls: list[str]
+) -> str:
+    """Multimodal Gemini call; bypasses text-only backend.complete."""
+    content: list[dict] = [{"type": "text", "text": user_text}]
+    for url in image_urls[:6]:  # bound the request
+        if url:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+    resp = backend._client.chat.completions.create(  # noqa: SLF001
+        model=backend.model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ],
+        max_tokens=2000,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _apply_image_verdicts(image_rows: list[dict], verdicts: list[dict]) -> tuple[int, int, int]:
+    """Delete DROPs and dupes; update captions on KEEPs. Returns
+    (dropped_irrelevant, dropped_duplicate, recaptioned)."""
+    by_id = {str(r["image_id"]): r for r in image_rows}
+    to_delete: set[str] = set()
+    caption_updates: list[tuple[str, str]] = []
+
+    for v in verdicts:
+        if not isinstance(v, dict):
+            continue
+        img_id = str(v.get("image_id") or "")
+        if img_id not in by_id:
+            continue
+        verdict = str(v.get("verdict") or "").upper()
+        dup_of = v.get("duplicate_of")
+        if verdict == "DROP":
+            to_delete.add(img_id)
+            continue
+        # KEEP: if marked as duplicate of another kept image, drop this too.
+        if dup_of and str(dup_of) in by_id and str(dup_of) != img_id:
+            to_delete.add(img_id)
+            continue
+        new_cap = (v.get("caption") or "").strip()[:400]
+        if new_cap:
+            caption_updates.append((new_cap, img_id))
+
+    dropped_irrelevant = 0
+    dropped_duplicate = 0
+    for img_id in to_delete:
+        # crude split: mark as duplicate if the LLM set duplicate_of
+        v = next((x for x in verdicts if str(x.get("image_id") or "") == img_id), None)
+        if v and v.get("duplicate_of"):
+            dropped_duplicate += 1
+        else:
+            dropped_irrelevant += 1
+
+    with cursor() as cur:
+        if to_delete:
+            cur.execute(
+                "DELETE FROM story_images WHERE id::text = ANY(%s)",
+                (list(to_delete),),
+            )
+        for cap, img_id in caption_updates:
+            cur.execute(
+                "UPDATE story_images SET caption = %s WHERE id::text = %s",
+                (cap, img_id),
+            )
+        # Re-pack ordinals per story so gaps don't confuse the renderer.
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT id,
+                       row_number() OVER (PARTITION BY story_id ORDER BY ordinal) - 1 AS new_ord
+                FROM story_images
+            )
+            UPDATE story_images si
+            SET ordinal = ranked.new_ord
+            FROM ranked
+            WHERE si.id = ranked.id AND si.ordinal <> ranked.new_ord
+            """
+        )
+    return dropped_irrelevant, dropped_duplicate, len(caption_updates)
+
+
+def verify_and_dedup_images() -> dict:
+    """Vision-based pass over story_images: drop irrelevant, dedupe visual
+    duplicates, rewrite captions. Requires GEMINI_API_KEY; no-op otherwise."""
+    from grounded.agents.llm import extract_json, make_gemini
+
+    backend = make_gemini()
+    if backend is None or getattr(backend, "is_local", False):
+        log.warning("verify_and_dedup_images: no Gemini backend; skipping")
+        return {"stories": 0, "checked": 0, "dropped_irrelevant": 0,
+                "dropped_duplicate": 0, "recaptioned": 0, "errors": 0}
+
+    grouped = _load_all_images_with_body()
+    total_checked = 0
+    total_drop_irrelevant = 0
+    total_drop_dupe = 0
+    total_recap = 0
+    errors = 0
+
+    for idx, (story_id, bucket) in enumerate(grouped.items()):
+        if idx > 0:
+            time.sleep(_VERIFY_SLEEP_SECONDS)
+        imgs = bucket["images"]
+        if not imgs:
+            continue
+        image_block = "\n".join(
+            f"- id={r['image_id']}, url={r['source_url']}, "
+            f"current_caption={r['caption'] or '(none)'}"
+            for r in imgs
+        )
+        user = (
+            f"STORY HEADLINE: {bucket['headline']}\n"
+            f"STORY DEK: {bucket['dek']}\n"
+            f"STORY BODY (source of truth for relevance):\n"
+            f"{bucket['body'][:_VERIFY_BODY_CHARS]}\n\n"
+            f"IMAGES TO REVIEW:\n{image_block}\n\n"
+            'Return JSON: {"verdicts": [{"image_id": "<id>", "verdict": "KEEP" | "DROP", "duplicate_of": "<other id or null>", "caption": "<one-sentence caption if KEEP>"}]}'
+        )
+        try:
+            raw = _vision_verify_gemini(
+                backend, _IMAGE_VERIFY_SYSTEM, user,
+                [r["source_url"] for r in imgs],
+            )
+            data = extract_json(raw)
+        except Exception as e:
+            log.warning("image verify failed for %s: %s", bucket["headline"][:60], e)
+            errors += 1
+            continue
+
+        verdicts = data.get("verdicts") if isinstance(data, dict) else None
+        if not isinstance(verdicts, list):
+            log.warning("image verify: unexpected response for %s", bucket["headline"][:60])
+            errors += 1
+            continue
+
+        di, dd, rc = _apply_image_verdicts(imgs, verdicts)
+        total_checked += len(imgs)
+        total_drop_irrelevant += di
+        total_drop_dupe += dd
+        total_recap += rc
+        log.info(
+            "%s: reviewed %d, dropped %d irrelevant, %d dupe, recaptioned %d",
+            bucket["headline"][:60], len(imgs), di, dd, rc,
+        )
+
+    return {
+        "stories": len(grouped),
+        "checked": total_checked,
+        "dropped_irrelevant": total_drop_irrelevant,
+        "dropped_duplicate": total_drop_dupe,
+        "recaptioned": total_recap,
+        "errors": errors,
+    }

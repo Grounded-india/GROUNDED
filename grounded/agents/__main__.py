@@ -187,8 +187,23 @@ def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
     default=None,
     help="Override path to the grounded-page repo.",
 )
+@click.option(
+    "--skip-fetch",
+    is_flag=True,
+    help="Skip the image fetch/extract step (use existing story_images rows).",
+)
+@click.option(
+    "--skip-verify",
+    is_flag=True,
+    help="Skip the Gemini vision verify + dedup pass over story_images.",
+)
 def cmd_enrich(
-    edition_date: str | None, out_path: str | None, no_site: bool, site_dir: str | None
+    edition_date: str | None,
+    out_path: str | None,
+    no_site: bool,
+    site_dir: str | None,
+    skip_fetch: bool,
+    skip_verify: bool,
 ) -> None:
     """Run the image-enrichment pass on the currently-approved stories and
     re-render the edition file. Does not wipe the DB or rebuild stories."""
@@ -197,7 +212,10 @@ def cmd_enrich(
 
     from grounded.agents.edition import render_edition
     from grounded.config import settings
-    from grounded.pipeline.images import enrich_stories_with_images
+    from grounded.pipeline.images import (
+        enrich_stories_with_images,
+        verify_and_dedup_images,
+    )
 
     if edition_date is None:
         edition_date = datetime.now().strftime("%Y-%m-%d")
@@ -205,12 +223,26 @@ def cmd_enrich(
     out_dir = Path(settings.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    click.echo(f"[enrich] fetching images for approved stories (date={edition_date})...")
-    ires = enrich_stories_with_images(out_dir, edition_date)
-    click.echo(
-        f"  images: {ires['with_images']}/{ires['stories']} stories "
-        f"({ires['primary_hits']} primary, {ires['fallback_hits']} fallback)"
-    )
+    if not skip_fetch:
+        click.echo(f"[enrich] fetching images for approved stories (date={edition_date})...")
+        ires = enrich_stories_with_images(out_dir, edition_date)
+        click.echo(
+            f"  images: {ires['with_images']}/{ires['stories']} stories "
+            f"({ires['primary_hits']} primary, {ires['fallback_hits']} fallback)"
+        )
+    else:
+        click.echo("[enrich] skip-fetch: using existing story_images rows")
+
+    if not skip_verify:
+        click.echo("[enrich] Gemini vision verify + dedup + recaption...")
+        vres = verify_and_dedup_images()
+        click.echo(
+            f"  verify: reviewed {vres['checked']} image(s) across {vres['stories']} stor(y/ies); "
+            f"dropped {vres['dropped_irrelevant']} irrelevant + {vres['dropped_duplicate']} duplicate; "
+            f"recaptioned {vres['recaptioned']}; errors {vres['errors']}"
+        )
+    else:
+        click.echo("[enrich] skip-verify: not running LLM check")
 
     click.echo("[enrich] rendering edition...")
     md = render_edition(approved_only=True)
