@@ -24,6 +24,7 @@ import logging
 
 from grounded.agents.llm import LLMBackend
 from grounded.agents.schemas import EventView, SourceDoc, VerifiedClaim
+from grounded.agents.timeframing import build_time_context
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,12 @@ _SYSTEM = (
     "(2) main narrative with details, actors, timeline, (3) background / "
     "why it matters if the sources establish it, (4) a closing line naming "
     "what remains uncertain or unanswered where applicable.\n"
+    "- TIME AWARENESS. The user prompt gives you a TIME CONTEXT block with the "
+    "current date and when the event was reported. Anchor the opening paragraph "
+    "in time: for today's news, present tense; for yesterday or earlier this "
+    "week, name the day ('On Monday, ...'); for archive/historical pieces "
+    "(>30 days), use the absolute date. Never invent a date the sources do not "
+    "give you. Do not force a date where the story is steady-state analysis.\n"
     "- Output plain markdown paragraphs. No headings, no bullet lists, "
     "no meta-commentary about the article itself. Answer directly."
 )
@@ -122,7 +129,11 @@ def build_report(
 
     facts = _facts_block(claims, docs)
     context = (context_md or "").strip()
+    time_ctx = build_time_context(
+        event.first_seen_at, event.earliest_source_published_at
+    )
     user = (
+        f"{time_ctx}\n\n"
         f"EVENT: {event.title}\n\n"
         f"BACKGROUND (from the Context Agent; use to frame the story but "
         f"do not repeat verbatim):\n{context or '(none)'}\n\n"

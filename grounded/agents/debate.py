@@ -30,13 +30,24 @@ from datetime import datetime
 
 from grounded.agents.llm import LLMBackend, extract_json
 from grounded.agents.schemas import EventView, SourceDoc, VerifiedClaim
+from grounded.agents.timeframing import build_time_context
 
 log = logging.getLogger(__name__)
 
 
-def _today_line() -> str:
-    now = datetime.now().astimezone()
-    return f"TODAY IS {now:%A, %d %B %Y}."
+def _today_line(event: EventView | None = None) -> str:
+    """Time-context header for a debate turn's user prompt.
+
+    Without ``event`` this is just today's date (used by the framing call,
+    which does not need per-event timing). With ``event``, it emits the full
+    TIME CONTEXT block so debaters can anchor claims in the right day.
+    """
+    if event is None:
+        now = datetime.now().astimezone()
+        return f"TODAY IS {now:%A, %d %B %Y}."
+    return build_time_context(
+        event.first_seen_at, event.earliest_source_published_at
+    )
 
 _MODERATOR_SYSTEM = (
     "You are a neutral news moderator writing the closing takeaway on a "
@@ -209,7 +220,7 @@ def _frame_sides(event: EventView, facts: str, backend: LLMBackend) -> tuple[str
     raw = backend.complete(
         system=_FRAMING_SYSTEM,
         user=(
-            f"{_today_line()}\n\n"
+            f"{_today_line(event)}\n\n"
             f"EVENT: {event.title}\n\nFACTS:\n{facts}\n\n"
             'Return JSON: {"side_a": "<short label>", "side_b": "<short label>"}'
         ),
@@ -244,7 +255,7 @@ def _argue(
         prior_block = "\n\nWHAT HAS BEEN SAID SO FAR IN THIS DEBATE:\n" + "\n\n".join(chunks)
 
     user = (
-        f"{_today_line()}\n\n"
+        f"{_today_line(event)}\n\n"
         f"EVENT: {event.title}\n\n"
         f"YOUR ASSIGNED SIDE: {side_label}\n\n"
         f"FACTS (all citations must trace to entries here):\n{facts}"
@@ -282,7 +293,7 @@ def _moderate(
             turns_block += f"\n\n[{label}]\n{text.strip()}"
 
     user = (
-        f"{_today_line()}\n\n"
+        f"{_today_line(event)}\n\n"
         f"EVENT: {event.title}\n\n"
         f"FACTS (all citations must trace to entries here):\n{facts}\n\n"
         f"THE DEBATE JUST HELD:{turns_block}\n\n"

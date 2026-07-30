@@ -14,6 +14,7 @@ from typing import Any
 
 from grounded.agents.cleaning import is_boilerplate, strip_boilerplate
 from grounded.db import cursor
+from grounded.pipeline.images import load_story_images
 
 # Outlet slugs that should render as acronyms rather than Title Case.
 _ACRONYMS = {"ap", "pib", "rbi", "sci", "prs", "un", "us", "usa", "gst", "cjp", "rss"}
@@ -122,6 +123,27 @@ def _render_story(i: int, s: dict) -> list[str]:
     if s.get("dek"):
         lines += [f"*{s['dek'].strip()}*", ""]
 
+    # Lead image (if any). Hybrid: markdown img uses the local cached copy so
+    # the file renders even if the source drops the image, but the caption line
+    # links back to the article the photo came from and credits the outlet.
+    images = load_story_images(s["id"])
+    if images:
+        lead = images[0]
+        img_src = lead["local_path"] or lead["source_url"]
+        alt = (lead["caption"] or s["headline"] or "").replace("]", " ").replace("[", " ")
+        lines += [f"![{alt}]({img_src})", ""]
+        credit_bits = []
+        if lead.get("caption"):
+            credit_bits.append(lead["caption"].strip())
+        credit = (lead.get("credit") or "").strip()
+        article_url = (lead.get("article_url") or "").strip()
+        if credit and article_url:
+            credit_bits.append(f"Photo via [{credit}]({article_url})")
+        elif credit:
+            credit_bits.append(f"Photo via {credit}")
+        if credit_bits:
+            lines += [f"<sub>*{' — '.join(credit_bits)}*</sub>", ""]
+
     badges = [mode.upper()]
     if trace.get("n_sources"):
         badges.append(f"{trace['n_sources']} sources")
@@ -172,6 +194,24 @@ def _render_story(i: int, s: dict) -> list[str]:
             else:
                 lines.append("- _No claims cleared the editor._")
             lines.append("")
+
+    # Additional images (positions 1+) — stacked before the sources footer.
+    if len(images) > 1:
+        for extra in images[1:]:
+            img_src = extra["local_path"] or extra["source_url"]
+            alt = (extra["caption"] or s["headline"] or "").replace("]", " ").replace("[", " ")
+            lines += [f"![{alt}]({img_src})", ""]
+            cap_bits = []
+            if extra.get("caption"):
+                cap_bits.append(extra["caption"].strip())
+            credit = (extra.get("credit") or "").strip()
+            article_url = (extra.get("article_url") or "").strip()
+            if credit and article_url:
+                cap_bits.append(f"Photo via [{credit}]({article_url})")
+            elif credit:
+                cap_bits.append(f"Photo via {credit}")
+            if cap_bits:
+                lines += [f"<sub>*{' — '.join(cap_bits)}*</sub>", ""]
 
     outlets = _story_outlets(s)
     if outlets:

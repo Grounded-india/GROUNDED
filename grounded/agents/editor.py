@@ -30,6 +30,7 @@ from uuid import UUID
 
 from grounded.agents.llm import LLMBackend, extract_json
 from grounded.agents.schemas import EventView, SourceDoc, StoryPackage, VerifiedClaim
+from grounded.agents.timeframing import build_time_context
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +55,23 @@ _AUDIT_SYSTEM = (
 )
 _HEADLINE_SYSTEM = (
     "You are a news copy editor. Write a factual, non-sensational headline and a "
-    "one-sentence dek grounded strictly in the given facts. Respond only with JSON."
+    "one-sentence dek grounded strictly in the given facts.\n"
+    "\n"
+    "TIME AWARENESS — the reader is picking up a dated newspaper. Anchor the "
+    "story in time whenever the timing is load-bearing.\n"
+    "- Use the TIME CONTEXT block in your user prompt for the current date and "
+    "when this event was first reported.\n"
+    "- For events from today: present tense; you may say 'today' in the dek if "
+    "the sources support it, but do not force it into the headline.\n"
+    "- For events from yesterday or earlier this week: name the day "
+    "('Yesterday, ...', 'On Monday, ...') in the dek. Only put a date in the "
+    "headline when the timing is central to the story.\n"
+    "- For archive/historical pieces (older than a week): prefix the dek with "
+    "the absolute date, e.g. 'From the archives — 29 July 1986: ...'.\n"
+    "- For steady-state analysis (no single event date), no date is needed.\n"
+    "- Never invent a date the sources do not give you.\n"
+    "\n"
+    "Respond only with JSON."
 )
 
 
@@ -143,10 +160,16 @@ def _llm_headline(
     event: EventView, claims: list[VerifiedClaim], backend: LLMBackend
 ) -> tuple[str, str]:
     facts = "\n".join(f"- {c.text}" for c in claims[:6]) or f"- {event.title}"
+    time_ctx = build_time_context(
+        event.first_seen_at, event.earliest_source_published_at
+    )
     raw = backend.complete(
         system=_HEADLINE_SYSTEM,
-        user=f"EVENT: {event.title}\nFACTS:\n{facts}\n\n"
-        'Return JSON: {"headline": "...", "dek": "..."}',
+        user=(
+            f"{time_ctx}\n\n"
+            f"EVENT: {event.title}\nFACTS:\n{facts}\n\n"
+            'Return JSON: {"headline": "...", "dek": "..."}'
+        ),
         max_tokens=200,
         temperature=0.3,
         json_mode=True,

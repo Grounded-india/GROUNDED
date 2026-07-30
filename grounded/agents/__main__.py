@@ -162,6 +162,68 @@ def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
     click.echo(f"[publish] copied → {dest}")
 
 
+@cli.command("enrich")
+@click.option(
+    "--date",
+    "edition_date",
+    default=None,
+    help="Edition date in YYYY-MM-DD (defaults to today). Only used to name the "
+    "output file and the image-cache folder — the DB state is not filtered by date.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Output file path (defaults to OUTPUT_DIR/edition-<date>.md).",
+)
+@click.option(
+    "--no-site",
+    is_flag=True,
+    help="Skip copying the enriched edition into grounded-page.",
+)
+@click.option(
+    "--site",
+    "site_dir",
+    default=None,
+    help="Override path to the grounded-page repo.",
+)
+def cmd_enrich(
+    edition_date: str | None, out_path: str | None, no_site: bool, site_dir: str | None
+) -> None:
+    """Run the image-enrichment pass on the currently-approved stories and
+    re-render the edition file. Does not wipe the DB or rebuild stories."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from grounded.agents.edition import render_edition
+    from grounded.config import settings
+    from grounded.pipeline.images import enrich_stories_with_images
+
+    if edition_date is None:
+        edition_date = datetime.now().strftime("%Y-%m-%d")
+
+    out_dir = Path(settings.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"[enrich] fetching images for approved stories (date={edition_date})...")
+    ires = enrich_stories_with_images(out_dir, edition_date)
+    click.echo(
+        f"  images: {ires['with_images']}/{ires['stories']} stories "
+        f"({ires['primary_hits']} primary, {ires['fallback_hits']} fallback)"
+    )
+
+    click.echo("[enrich] rendering edition...")
+    md = render_edition(approved_only=True)
+    if out_path is None:
+        out_path = str(out_dir / f"edition-{edition_date}.md")
+    Path(out_path).write_text(md, encoding="utf-8")
+    click.echo(f"[enrich] wrote {out_path}")
+
+    if not no_site:
+        site = Path(site_dir).expanduser().resolve() if site_dir else None
+        _copy_edition_to_site(Path(out_path), site)
+
+
 @cli.command("publish")
 @click.option("--skip-wipe", is_flag=True, help="Don't wipe DB before running (useful for testing).")
 @click.option("--limit", default=None, type=int, help="Override pipeline top_n.")
@@ -296,7 +358,11 @@ def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str
             f"failed {sres['failed']} (of {sres['pending']} pending)"
         )
         click.echo("[publish] build (top-up)...")
-        bres = build_stories()  # picks up SELECTED events without stories
+        # Pass limit=batch so this pass only processes the freshly-promoted
+        # events. Without the limit, any SELECTED events without a story row
+        # (e.g. from prior failures) would be re-attempted every top-up pass
+        # and the candidate count would snowball.
+        bres = build_stories(limit=batch)
         click.echo(
             f"  built {bres['built']}: {bres['approved']} approved, "
             f"{bres['rejected']} rejected, {bres['skipped']} skipped, "
