@@ -8,6 +8,7 @@ layer and from any Layer 1/2 changes a teammate might make.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -22,6 +23,11 @@ class EventView:
     title: str
     summary: str | None = None
     importance_score: float | None = None
+    # Timestamps threaded through so downstream agents (editor, reporter,
+    # debate) can make headlines and prose time-aware. All timezone-aware UTC.
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    earliest_source_published_at: datetime | None = None
 
 
 @dataclass(frozen=True)

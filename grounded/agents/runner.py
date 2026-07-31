@@ -8,9 +8,35 @@ from uuid import UUID
 from grounded.agents.crew import build_story
 from grounded.agents.loader import load_events_needing_stories
 from grounded.agents.router import as_router
+from grounded.agents.schemas import StoryPackage
 from grounded.agents.store import save_story
 
 log = logging.getLogger(__name__)
+
+
+def _save_failure_stub(event_id: UUID, reason: str) -> None:
+    """Persist a rejected stub for a crew failure so the event does not get
+    re-picked by ``load_events_needing_stories`` on the next top-up pass.
+
+    Without this, a transient LLM 404 or timeout would leave the event
+    SELECTED-without-a-story, and every subsequent ``build_stories()`` call
+    would re-attempt it — the candidate pool would snowball each pass.
+    """
+    try:
+        save_story(
+            StoryPackage(
+                event_id=event_id,
+                headline="",
+                dek="",
+                body_markdown="",
+                claims=[],
+                editor_approved=False,
+                editor_notes=f"crew failed: {reason}",
+                agent_trace={"failure_reason": reason},
+            )
+        )
+    except Exception:
+        log.exception("could not persist failure stub for event %s", event_id)
 
 
 def build_stories(
@@ -46,8 +72,9 @@ def build_stories(
         try:
             package = build_story(event, docs, router)
             save_story(package)
-        except Exception:
+        except Exception as e:
             log.exception("event %s failed; skipping to next", event.id)
+            _save_failure_stub(event.id, f"{type(e).__name__}: {e}"[:400])
             failed += 1
             continue
         built += 1

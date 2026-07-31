@@ -32,7 +32,12 @@ class Settings(BaseSettings):
 
     # How many top MAIN events advance to Layer 3 per ranking run.
     # The daily edition renders these under "## Today".
-    select_top_n: int = Field(default=12, alias="SELECT_TOP_N")
+    select_top_n: int = Field(default=25, alias="SELECT_TOP_N")
+
+    # Floor for the final edition. If dedup leaves fewer approved stories than
+    # this, publish promotes more ranked candidates and runs another crew pass
+    # to top up — see cmd_publish top-up loop.
+    min_final_stories: int = Field(default=20, alias="MIN_FINAL_STORIES")
 
     def has_voyage_key(self) -> bool:
         key = (self.voyage_api_key or "").strip()

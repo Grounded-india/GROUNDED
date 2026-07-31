@@ -49,6 +49,10 @@ python -m grounded.agents build --limit 5
 pip install openai                          # not yet in pyproject.toml
 #    add NVIDIA_API_KEY and GEMINI_API_KEY to .env
 python -m grounded.agents build --limit 5
+
+# 6. Publish today's edition into the reader site (../grounded-page)
+python publish.py
+#    leave `npm run publish:live` running in grounded-page — refresh to see it
 ```
 
 See [docs/progress.md](docs/progress.md) for the full command reference, live-run results, and known limitations.

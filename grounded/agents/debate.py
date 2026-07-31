@@ -30,13 +30,24 @@ from datetime import datetime
 
 from grounded.agents.llm import LLMBackend, extract_json
 from grounded.agents.schemas import EventView, SourceDoc, VerifiedClaim
+from grounded.agents.timeframing import build_time_context
 
 log = logging.getLogger(__name__)
 
 
-def _today_line() -> str:
-    now = datetime.now().astimezone()
-    return f"TODAY IS {now:%A, %d %B %Y}."
+def _today_line(event: EventView | None = None) -> str:
+    """Time-context header for a debate turn's user prompt.
+
+    Without ``event`` this is just today's date (used by the framing call,
+    which does not need per-event timing). With ``event``, it emits the full
+    TIME CONTEXT block so debaters can anchor claims in the right day.
+    """
+    if event is None:
+        now = datetime.now().astimezone()
+        return f"TODAY IS {now:%A, %d %B %Y}."
+    return build_time_context(
+        event.first_seen_at, event.earliest_source_published_at
+    )
 
 _MODERATOR_SYSTEM = (
     "You are a neutral news moderator writing the closing takeaway on a "
@@ -144,7 +155,24 @@ _DEBATER_SYSTEM = (
     "- Closing turn = synthesise with a NEW angle or a concise final point. "
     "Not a re-list of your prior arguments.\n"
     "- If you genuinely have no new material to add, keep the turn short. "
-    "Quality over quantity. Repetition weakens your argument."
+    "Quality over quantity. Repetition weakens your argument.\n"
+    "\n"
+    "REQUESTING RESEARCH (opening / rebuttal turns only, not closing)\n"
+    "- If a SPECIFIC factual claim would materially strengthen your side and "
+    "that claim is NOT already in the facts block, you may end your response "
+    "with ONE line, exactly this shape:\n"
+    "    RESEARCH: <one specific factual question>\n"
+    "  Example: `RESEARCH: did the Delhi Police issue a public statement on "
+    "the July 20 lathi-charge at Parliament?`\n"
+    "- Rules:\n"
+    "  * The claim must be publicly reported (searchable news, not opinion).\n"
+    "  * The claim must be genuinely absent from the current facts block.\n"
+    "  * ONE query max per turn. Make it specific and factual.\n"
+    "  * Do NOT request research if the facts already cover it, or if the "
+    "gap is opinion / values / interpretation (research cannot answer those).\n"
+    "  * If you have no such gap, do not include the RESEARCH line at all.\n"
+    "- The RESEARCH line is a control signal — it will be stripped from the "
+    "published dialogue. Write your normal argument first, THEN the line."
 )
 
 
@@ -192,7 +220,7 @@ def _frame_sides(event: EventView, facts: str, backend: LLMBackend) -> tuple[str
     raw = backend.complete(
         system=_FRAMING_SYSTEM,
         user=(
-            f"{_today_line()}\n\n"
+            f"{_today_line(event)}\n\n"
             f"EVENT: {event.title}\n\nFACTS:\n{facts}\n\n"
             'Return JSON: {"side_a": "<short label>", "side_b": "<short label>"}'
         ),
@@ -227,7 +255,7 @@ def _argue(
         prior_block = "\n\nWHAT HAS BEEN SAID SO FAR IN THIS DEBATE:\n" + "\n\n".join(chunks)
 
     user = (
-        f"{_today_line()}\n\n"
+        f"{_today_line(event)}\n\n"
         f"EVENT: {event.title}\n\n"
         f"YOUR ASSIGNED SIDE: {side_label}\n\n"
         f"FACTS (all citations must trace to entries here):\n{facts}"
@@ -265,7 +293,7 @@ def _moderate(
             turns_block += f"\n\n[{label}]\n{text.strip()}"
 
     user = (
-        f"{_today_line()}\n\n"
+        f"{_today_line(event)}\n\n"
         f"EVENT: {event.title}\n\n"
         f"FACTS (all citations must trace to entries here):\n{facts}\n\n"
         f"THE DEBATE JUST HELD:{turns_block}\n\n"
@@ -333,6 +361,49 @@ def _local_debate(
     )
 
 
+_MAX_RESEARCH_CALLS_PER_DEBATE = 2
+
+
+def _maybe_research(
+    turn_name: str,
+    turn_text: str,
+    docs: list[SourceDoc],
+    research_log: list[dict],
+    budget_left: list[int],  # single-element list acts as mutable counter
+) -> tuple[str, list[SourceDoc]]:
+    """Parse RESEARCH: from a turn, run it if budget allows, return
+    (cleaned_turn_text, possibly-augmented docs list). Never raises.
+    """
+    from grounded.agents.research import (
+        do_research,
+        extract_research_query,
+        strip_research_directive,
+    )
+
+    query = extract_research_query(turn_text)
+    if not query:
+        return turn_text, docs
+
+    cleaned = strip_research_directive(turn_text)
+
+    if budget_left[0] <= 0:
+        log.info("research: %s requested %r but budget exhausted", turn_name, query)
+        research_log.append({"turn": turn_name, "query": query, "skipped": "budget_exhausted"})
+        return cleaned, docs
+
+    budget_left[0] -= 1
+    new_docs = do_research(query)
+    research_log.append({
+        "turn": turn_name,
+        "query": query,
+        "docs_added": len(new_docs),
+        "urls": [d.source_url for d in new_docs],
+    })
+    if not new_docs:
+        return cleaned, docs
+    return cleaned, list(docs) + new_docs
+
+
 def run_debate(
     event: EventView,
     claims: list[VerifiedClaim],
@@ -345,38 +416,62 @@ def run_debate(
     facts = _facts_block(claims, docs)
     label_a, label_b = _frame_sides(event, facts, backend)
 
-    # Turn 1: A opens with no prior context.
-    opening_a = _argue(label_a, event, facts, prior_turns=[], backend=backend, turn="OPENING")
+    # Research state: shared across all turns of this debate.
+    research_log: list[dict] = []
+    research_budget = [_MAX_RESEARCH_CALLS_PER_DEBATE]
 
-    # Turn 2: B opens seeing A's opening.
-    opening_b = _argue(
+    # Turn 1: A opens with no prior context. Debater may append RESEARCH: —
+    # if it fires, docs + facts_block get augmented for subsequent turns.
+    opening_a_raw = _argue(
+        label_a, event, facts, prior_turns=[], backend=backend, turn="OPENING",
+    )
+    opening_a, docs = _maybe_research(
+        "opening_a", opening_a_raw, docs, research_log, research_budget,
+    )
+    if docs is not None:
+        facts = _facts_block(claims, docs)
+
+    # Turn 2: B opens seeing A's opening (+ any research A pulled in).
+    opening_b_raw = _argue(
         label_b, event, facts,
         prior_turns=[(label_a, opening_a)] if opening_a else [],
         backend=backend, turn="OPENING (responding to the other side's opening)",
     )
+    opening_b, docs = _maybe_research(
+        "opening_b", opening_b_raw, docs, research_log, research_budget,
+    )
+    facts = _facts_block(claims, docs)
 
-    # Turn 3: A rebuts, seeing B's opening.
+    # Turn 3: A rebuts, seeing B's opening + any B research.
     prior_for_a = [(label_a, opening_a), (label_b, opening_b)] if opening_a else []
     if not opening_a:
         prior_for_a = [(label_b, opening_b)] if opening_b else []
-    rebuttal_a = _argue(
+    rebuttal_a_raw = _argue(
         label_a, event, facts,
         prior_turns=prior_for_a,
         backend=backend, turn="REBUTTAL (address the other side's opening)",
     )
+    rebuttal_a, docs = _maybe_research(
+        "rebuttal_a", rebuttal_a_raw, docs, research_log, research_budget,
+    )
+    facts = _facts_block(claims, docs)
 
-    # Turn 4: B closes, seeing everything.
+    # Turn 4: B closes, seeing everything. No research on closing (should
+    # synthesise, not shop for new facts). Any RESEARCH: line here is stripped
+    # but not executed.
     prior_for_b_close = [
         (label_a, opening_a),
         (label_b, opening_b),
         (label_a + " (rebuttal)", rebuttal_a),
     ]
     prior_for_b_close = [(lbl, t) for lbl, t in prior_for_b_close if t]
-    rebuttal_b = _argue(
+    rebuttal_b_raw = _argue(
         label_b, event, facts,
         prior_turns=prior_for_b_close,
         backend=backend, turn="CLOSING (address the other side's rebuttal)",
     )
+    from grounded.agents.research import strip_research_directive
+    rebuttal_b = strip_research_directive(rebuttal_b_raw)
 
     # Turn 5: neutral moderator wrap-up. Reads everything, states what is
     # settled and what remains contested. Does not pick a winner on judgement.
@@ -399,5 +494,7 @@ def run_debate(
             "mode": backend.name,
             "sides": [label_a, label_b],
             "turns": ["opening_a", "opening_b", "rebuttal_a", "rebuttal_b", "conclusion"],
+            "research": research_log,
+            "research_calls_used": _MAX_RESEARCH_CALLS_PER_DEBATE - research_budget[0],
         },
     )

@@ -272,8 +272,16 @@ def score_features(f: EventFeatures, recency_window_hours: float = 48.0) -> floa
     ):
         score -= 1.5
 
-    # Recency: linear decay to zero across the window.
-    score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)
+    # Recency: ground-reality stories get a much bigger boost and a tighter
+    # window (24h) — a 4h-old protest should crush a 20h-old one of similar
+    # coverage. Non-ground-reality (analysis, business, policy) keeps the
+    # gentler original 48h/1.0 curve.
+    if f.ground_reality_hits >= 1:
+        if f.recency_hours <= 24.0:
+            score += 3.0 * (1.0 - f.recency_hours / 24.0)
+        # older than 24h: no recency bonus, but still eligible via other signals
+    else:
+        score += max(0.0, 1.0 - f.recency_hours / recency_window_hours)
 
     # --- downweights: what makes the ranker resistant to being gamed ---
     score -= min(f.downweight_hits, 6) * 0.7
@@ -349,6 +357,43 @@ def select_event_ids(
     ]
     eligible.sort(key=lambda x: (-x[1], str(x[0])))
     return [eid for eid, _ in eligible[:top_n]]
+
+
+def promote_next_candidates(n: int) -> list:
+    """Flip the next ``n`` best-scoring CANDIDATE events to SELECTED and return
+    their ids. Used by the publish top-up loop when dedup leaves fewer approved
+    stories than the target floor.
+
+    Only events with ``tier_1_anchor = TRUE`` and ``importance_score > 0`` are
+    eligible — same gate as ``select_event_ids`` uses for the initial cut.
+    Idempotent within a single publish run: candidates that get promoted here
+    will not be re-considered by a subsequent call (they are no longer
+    CANDIDATE).
+    """
+    if n <= 0:
+        return []
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+            FROM events
+            WHERE status = %s
+              AND tier_1_anchor = TRUE
+              AND importance_score > 0
+            ORDER BY importance_score DESC, id
+            LIMIT %s
+            """,
+            (EventStatus.CANDIDATE, n),
+        )
+        ids = [r["id"] for r in cur.fetchall()]
+        if not ids:
+            return []
+        cur.execute(
+            "UPDATE events SET status = %s WHERE id = ANY(%s)",
+            (EventStatus.SELECTED, ids),
+        )
+    log.info("top-up: promoted %d candidate event(s) to SELECTED", len(ids))
+    return ids
 
 
 def rank_events(top_n: int | None = None, now: datetime | None = None) -> dict:

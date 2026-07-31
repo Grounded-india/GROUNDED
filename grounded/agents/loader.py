@@ -63,7 +63,12 @@ def load_events_needing_stories(
         params.append(event_id)
 
     query = f"""
-        SELECT e.id, e.title, e.summary, e.importance_score
+        SELECT e.id, e.title, e.summary, e.importance_score,
+               e.first_seen_at, e.last_seen_at,
+               (SELECT MIN(r.published_at)
+                FROM raw_items r
+                JOIN event_items ei ON ei.raw_item_id = r.id
+                WHERE ei.event_id = e.id) AS earliest_pub
         FROM events e
         LEFT JOIN stories s ON s.event_id = e.id
         WHERE {" AND ".join(clauses)}
@@ -84,6 +89,9 @@ def load_events_needing_stories(
             title=row["title"],
             summary=row["summary"],
             importance_score=row["importance_score"],
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            earliest_source_published_at=row["earliest_pub"],
         )
         result.append((view, load_event_docs(row["id"])))
     return result
