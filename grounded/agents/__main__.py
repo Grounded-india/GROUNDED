@@ -489,7 +489,8 @@ def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str
     # 6b. COHERENCE — catch stories where the headline no longer describes
     # the body (Layer-2 clustering can merge two events; the reporter writes
     # from one, the title comes from the other). Rewrites where possible,
-    # drops where the body itself is a mix.
+    # drops where the body itself is a mix. Runs BEFORE image enrichment so
+    # the image verify step gets the corrected headlines.
     click.echo("[publish] coherence check...")
     from grounded.agents.coherence import check_and_repair_coherence
     cres = check_and_repair_coherence()
@@ -497,6 +498,29 @@ def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str
         f"  coherence: {cres['coherent']}/{cres['stories']} coherent, "
         f"{cres['rewritten']} rewritten, {cres['dropped']} dropped, "
         f"{cres['errors']} error(s)"
+    )
+
+    # 6c. IMAGES — re-fetch every cited article's HTML, extract 1-3 images
+    # per story (article-body scoping, cross-story dedup, junk blocklist),
+    # then run the Gemini vision pass to verify relevance, drop visual
+    # duplicates, and rewrite captions grounded in the body.
+    click.echo("[publish] fetching images for approved stories...")
+    from grounded.pipeline.images import (
+        enrich_stories_with_images,
+        verify_and_dedup_images,
+    )
+    edition_date_str = datetime.now().strftime("%Y-%m-%d")
+    ires = enrich_stories_with_images(out_dir, edition_date_str)
+    click.echo(
+        f"  images: {ires['with_images']}/{ires['stories']} stories "
+        f"({ires['primary_hits']} primary, {ires['fallback_hits']} fallback)"
+    )
+    click.echo("[publish] Gemini vision verify + dedup + recaption...")
+    vres = verify_and_dedup_images()
+    click.echo(
+        f"  verify: reviewed {vres['checked']} image(s) across {vres['stories']} stor(y/ies); "
+        f"dropped {vres['dropped_irrelevant']} irrelevant + {vres['dropped_duplicate']} duplicate; "
+        f"recaptioned {vres['recaptioned']}; errors {vres['errors']}"
     )
 
     # 7. EDITION.

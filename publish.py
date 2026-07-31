@@ -1,7 +1,12 @@
 """One-shot daily publish for Grounded.
 
-Wipes the DB, runs the full pipeline, builds all stories, renders the daily
-edition markdown, and (by default) copies it into the sibling reader site.
+Runs the full pipeline end-to-end:
+
+    wipe -> ingest -> embed -> cluster -> rank -> scrape ->
+    build (crew) -> dedup -> top-up loop ->
+    coherence check (headline/dek match body?) ->
+    image fetch + Gemini vision verify (relevance, dedup, recaption) ->
+    render edition -> copy to grounded-page
 
 Run:
     python publish.py                 # full fresh publish + copy to grounded-page
@@ -9,7 +14,9 @@ Run:
     python publish.py --limit 30      # override top-N
     python publish.py --no-site       # skip copy into ../grounded-page
 
-Output: ./output/edition-YYYY-MM-DD.md
+Output:
+    ./output/edition-YYYY-MM-DD.md
+    ./output/images/YYYY-MM-DD/*     (downloaded photo backups)
 """
 
 from __future__ import annotations
