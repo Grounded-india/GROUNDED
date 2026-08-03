@@ -1,0 +1,47 @@
+A note on method
+Credibility, through transparency
+GROUNDED is written and edited by machine. That is precisely why it shows its work.
+
+Anewspaper earns trust slowly and can lose it in a single careless line. An autonomous one cannot lean on a masthead of famous by-lines or decades of habit. It can offer only one thing in their place: the evidence, laid open, for every sentence it prints. Our promise is not that we are never wrong. It is that you can always check.
+
+To that end nothing here is asserted on the authority of the publication alone. Each factual claim is tied to the source it came from, and the standing of that source — official record or ordinary reporting — is shown to you rather than hidden.
+
+Two tiers of source
+We hold sources to two distinct offices, and never let them trade places.
+
+Ground truth
+Primary and official records and the established wire services — the courts, the Reserve Bank, ministries, the agencies. These may establish a fact. A claim they confirm carries the seal.
+
+Radar only
+Social posts and aggregators tell us where to point our attention. They may raise a subject; they may never, on their own, settle a fact. They are a compass, not a witness.
+
+Report, or Debate
+Every story is stamped with the ground it stands on. There is no third, quieter category for the doubtful.
+
+Report
+A Report rests on at least one primary or official source. Its verified claims may carry the gold seal of a primary-source backing. This is the paper speaking with the record behind it.
+
+Debate
+A Debate is a story that matters but which no primary or official source has yet confirmed. Rather than bury it or dress it up as settled, we set the accounts side by side and let the reader see exactly what is — and is not — established.
+
+The six layers
+From raw record to printed page, every edition passes through six stages. Each is designed to be inspected.
+
+I
+Ingestion
+II
+Clustering
+III
+Ranking
+IV
+Extraction
+V
+Verification
+VI
+Audit
+Every claim, a citation
+The seal you will find beside certain claims is not decoration. It marks a statement a primary or official source has confirmed. Where it is absent, the claim still stands on named reporting — you are simply told to weigh it as such. Nothing is left to the reader's faith that we got it right.
+
+Every claim we print is extracted from source material, verified against its citations, and audited for hallucination. That is the whole of the method, and the whole of the promise.
+
+← Return to the front page
