@@ -143,10 +143,11 @@ def _default_site_dir() -> "Path":
 
 
 def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
-    import shutil
     from pathlib import Path
 
-    site_root = site_dir if site_dir is not None else _default_site_dir()
+    from grounded.handoff import sync_edition_bundle
+
+    site_root = Path(site_dir).expanduser().resolve() if site_dir else _default_site_dir()
     if not site_root.is_dir():
         click.echo(
             f"[publish] grounded-page not found at {site_root}\n"
@@ -155,11 +156,10 @@ def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
             err=True,
         )
         return
-    dest_dir = site_root / "content" / "editions"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / out_path.name
-    shutil.copy2(out_path, dest)
-    click.echo(f"[publish] copied → {dest}")
+    synced = sync_edition_bundle(edition_file=out_path, site_root=site_root)
+    click.echo(f"[publish] copied → {synced['markdown']}")
+    if synced["images"]:
+        click.echo(f"[publish] copied → {synced['images']}")
 
 
 @cli.command("enrich")

@@ -53,6 +53,9 @@ python -m grounded.agents build --limit 5
 # 6. Publish today's edition into the reader site (../grounded-page)
 python publish.py
 #    leave `npm run publish:live` running in grounded-page — refresh to see it
+
+# Automated daily publish (09:00 IST): see docs/ci-publishing.md
+# GitHub Actions → Daily publish → Run workflow (after secrets are configured)
 ```
 
 See [docs/progress.md](docs/progress.md) for the full command reference, live-run results, and known limitations.

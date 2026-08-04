@@ -1,0 +1,89 @@
+# Daily newspaper publish: run the full GROUNDED pipeline, then push the
+# edition bundle (markdown + images) to the grounded-page repo. Vercel (or any
+# host wired to grounded-page main) redeploys automatically on that push.
+#
+# Schedule: 09:00 IST = 03:30 UTC
+# Manual: Actions → Daily publish → Run workflow
+
+name: Daily publish
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-publish
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgresql://grounded:grounded@localhost:5432/grounded
+  OUTPUT_DIR: ./output
+  EMBEDDING_BACKEND: voyage
+  GEMINI_MODEL: gemini-flash-lite-latest
+  NEMOTRON_MODEL: nvidia/llama-3.3-nemotron-super-49b-v1.5
+  GIT_AUTHOR_NAME: GROUNDED Bot
+  GIT_AUTHOR_EMAIL: bot@grounded.india
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Start Postgres
+        run: |
+          docker compose -f infra/docker-compose.yml up -d
+          for i in $(seq 1 40); do
+            if docker exec grounded-postgres pg_isready -U grounded -d grounded; then
+              echo "Postgres ready"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Postgres failed to become ready"
+          docker compose -f infra/docker-compose.yml logs
+          exit 1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install openai
+
+      - name: Run publish pipeline
+        env:
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python publish.py --no-site
+
+      - name: Checkout frontend repo
+        uses: actions/checkout@v4
+        with:
+          repository: Grounded-india/grounded-page
+          token: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+          path: grounded-page
+          ref: main
+
+      - name: Push edition to frontend
+        run: python scripts/push_to_frontend.py --site grounded-page --source-dir output
+
+      - name: Upload edition artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edition-${{ github.run_id }}
+          path: |
+            output/edition-*.md
+            output/images/**/*
+          if-no-files-found: ignore
