@@ -162,6 +162,26 @@ def _copy_edition_to_site(out_path: "Path", site_dir: "Path | None") -> None:
     click.echo(f"[publish] copied → {dest}")
 
 
+def _copy_translations_to_site(src_dir: "Path", site_dir: "Path | None") -> None:
+    """Copy a per-edition translation folder into grounded-page as a unit."""
+    import shutil
+    from pathlib import Path
+
+    site_root = site_dir if site_dir is not None else _default_site_dir()
+    if not site_root.is_dir():
+        click.echo(
+            f"[publish] grounded-page not found at {site_root}; translations left "
+            f"in {src_dir}",
+            err=True,
+        )
+        return
+    dest = site_root / "content" / "editions" / src_dir.name
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in sorted(Path(src_dir).glob("*.md")):
+        shutil.copy2(f, dest / f.name)
+    click.echo(f"[publish] copied {src_dir.name}/ → {dest}")
+
+
 @cli.command("enrich")
 @click.option(
     "--date",
@@ -331,12 +351,100 @@ def cmd_coherence(
         _copy_edition_to_site(Path(out_path), site)
 
 
+@cli.command("translate")
+@click.option(
+    "--date",
+    "edition_date",
+    default=None,
+    help="Edition date in YYYY-MM-DD (defaults to today). Picks OUTPUT_DIR/edition-<date>.md.",
+)
+@click.option(
+    "--src",
+    "src_path",
+    default=None,
+    help="Edition markdown file to translate (overrides --date).",
+)
+@click.option(
+    "--lang",
+    "langs",
+    multiple=True,
+    help="Target language code, repeatable (hi, kn, mr, te, ta, bn, ml, gu, pa, ur). "
+    "Defaults to EDITION_LANGUAGES or hi,kn,mr,te.",
+)
+@click.option(
+    "--out-dir",
+    "out_dir",
+    default=None,
+    help="Folder to write the multilingual edition into "
+    "(default OUTPUT_DIR/editions/<date>/).",
+)
+@click.option("--no-site", is_flag=True, help="Skip copying translations into grounded-page.")
+@click.option("--site", "site_dir", default=None, help="Override path to the grounded-page repo.")
+def cmd_translate(
+    edition_date: str | None,
+    src_path: str | None,
+    langs: tuple[str, ...],
+    out_dir: str | None,
+    no_site: bool,
+    site_dir: str | None,
+) -> None:
+    """Translate an already-rendered edition into Indian languages."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from grounded.agents.translate import resolve_languages, translate_edition_file
+    from grounded.config import settings
+
+    if src_path is None:
+        if edition_date is None:
+            edition_date = datetime.now().strftime("%Y-%m-%d")
+        src = Path(settings.output_dir) / f"edition-{edition_date}.md"
+    else:
+        src = Path(src_path)
+
+    if not src.is_file():
+        raise click.ClickException(f"no edition file at {src}")
+
+    codes = resolve_languages(langs)
+    if not codes:
+        click.echo("[translate] no target languages resolved; nothing to do")
+        return
+
+    click.echo(f"[translate] {src.name} -> {', '.join(codes)}")
+    tres = translate_edition_file(
+        src, codes, Path(out_dir) if out_dir else None
+    )
+    for path in tres["written"]:
+        click.echo(f"  wrote {path}")
+    if tres["failed"]:
+        click.echo(f"  failed: {', '.join(tres['failed'])}", err=True)
+
+    if not no_site:
+        site = Path(site_dir).expanduser().resolve() if site_dir else None
+        _copy_translations_to_site(tres["dir"], site)
+
+
 @cli.command("publish")
 @click.option("--skip-wipe", is_flag=True, help="Don't wipe DB before running (useful for testing).")
 @click.option("--limit", default=None, type=int, help="Override pipeline top_n.")
 @click.option("--no-site", is_flag=True, help="Skip copying the edition into grounded-page.")
 @click.option("--site", "site_dir", default=None, help="Override path to the grounded-page repo.")
-def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str | None) -> None:
+@click.option("--no-translate", is_flag=True, help="Skip the multi-language translation pass.")
+@click.option(
+    "--lang",
+    "langs",
+    multiple=True,
+    help="Target language code for translation, repeatable. "
+    "Defaults to EDITION_LANGUAGES or hi,kn,mr,te.",
+)
+def cmd_publish(
+    skip_wipe: bool,
+    limit: int | None,
+    no_site: bool,
+    site_dir: str | None,
+    no_translate: bool,
+    langs: tuple[str, ...],
+) -> None:
     """One-shot daily publish: wipe -> ingest -> pipeline -> build -> edition."""
     import time
     from datetime import datetime
@@ -531,9 +639,31 @@ def cmd_publish(skip_wipe: bool, limit: int | None, no_site: bool, site_dir: str
     elapsed_min = (time.monotonic() - t0) / 60
     click.echo(f"[publish] wrote {out_path} (total {elapsed_min:.1f} min)")
 
+    site = Path(site_dir).expanduser().resolve() if site_dir else None
     if not no_site:
-        site = Path(site_dir).expanduser().resolve() if site_dir else None
         _copy_edition_to_site(out_path, site)
+
+    # 8. TRANSLATE — the English edition is already written and copied by this
+    # point, so a translation failure can never cost us the edition itself.
+    if not no_translate:
+        from grounded.agents.translate import resolve_languages, translate_edition_file
+
+        codes = resolve_languages(langs)
+        if codes:
+            click.echo(f"[publish] translating edition -> {', '.join(codes)}...")
+            try:
+                tres = translate_edition_file(out_path, codes)
+            except Exception as e:
+                click.echo(f"  translation pass failed: {e}", err=True)
+            else:
+                for path in tres["written"]:
+                    click.echo(f"  wrote {path}")
+                if tres["failed"]:
+                    click.echo(f"  failed: {', '.join(tres['failed'])}", err=True)
+                if not no_site:
+                    _copy_translations_to_site(tres["dir"], site)
+
+    click.echo(f"[publish] done ({(time.monotonic() - t0) / 60:.1f} min total)")
 
 
 if __name__ == "__main__":
