@@ -13,7 +13,7 @@ backend pipeline and pushes the resulting newspaper to the frontend repo.
 
 ## Schedule
 
-- **09:00 IST every day** (`30 3 * * *` UTC)
+- **12:00 IST every day** (`30 6 * * *` UTC)
 - **Manual run:** GitHub → Actions → *Daily publish* → *Run workflow*
 
 ## Required secrets (GROUNDED repo)

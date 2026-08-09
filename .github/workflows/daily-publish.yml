@@ -2,14 +2,14 @@
 # edition bundle (markdown + images) to the grounded-page repo. Vercel (or any
 # host wired to grounded-page main) redeploys automatically on that push.
 #
-# Schedule: 09:00 IST = 03:30 UTC
+# Schedule: 12:00 IST = 06:30 UTC
 # Manual: Actions → Daily publish → Run workflow
 
 name: Daily publish
 
 on:
   schedule:
-    - cron: "30 3 * * *"
+    - cron: "30 6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -32,10 +32,10 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -68,7 +68,7 @@ jobs:
         run: python publish.py --no-site
 
       - name: Checkout frontend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Grounded-india/grounded-page
           token: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload edition artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: edition-${{ github.run_id }}
           path: |
