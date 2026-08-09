@@ -29,10 +29,12 @@ Add these under **Settings → Secrets and variables → Actions**:
 
 ### Creating `GROUNDPAGE_DEPLOY_TOKEN`
 
-1. GitHub → Settings → Developer settings → Personal access tokens (fine-grained)
-2. Repository access: **Only** `Grounded-india/grounded-page`
-3. Permissions: **Contents → Read and write**
-4. Copy the token into GROUNDED repo secret `GROUNDPAGE_DEPLOY_TOKEN`
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
+2. **Repository access:** Only **`Grounded-india/grounded-page`**
+3. **Permissions:** **Contents → Read and write** (required — Actions/Workflows alone will **not** work)
+4. Generate, copy once, add as secret `GROUNDPAGE_DEPLOY_TOKEN` on the **GROUNDED** repo
+
+If push fails with `Permission denied to <your-username>`, the token is missing **Contents** write or the secret name is wrong.
 
 ## Local equivalent
 

@@ -20,6 +20,37 @@ def _run(cmd: list[str], *, cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def _configure_push_auth(site: Path) -> None:
+    """Use GROUNDPAGE_DEPLOY_TOKEN for cross-repo push (required in CI)."""
+    token = os.environ.get("GROUNDPAGE_DEPLOY_TOKEN", "").strip()
+    if not token:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(
+                "push_to_frontend: GROUNDPAGE_DEPLOY_TOKEN is not set; "
+                "cannot push to grounded-page from Actions",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        return
+
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=site,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    url = result.stdout.strip()
+    if "github.com/" not in url:
+        return
+
+    repo_path = url.split("github.com/", 1)[1]
+    repo_path = repo_path.removeprefix("x-access-token:").split("@")[-1]
+    repo_path = repo_path.removesuffix(".git")
+    authed = f"https://x-access-token:{token}@github.com/{repo_path}.git"
+    _run(["git", "remote", "set-url", "origin", authed], cwd=site)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Push an edition bundle to grounded-page.")
     parser.add_argument("--site", required=True, help="Path to grounded-page repo checkout")
@@ -65,7 +96,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _run(["git", "commit", "-m", f"chore: publish edition {date}"], cwd=site)
-    _run(["git", "push", "origin", f"HEAD:{args.branch}"], cwd=site)
+    _configure_push_auth(site)
+    push = subprocess.run(
+        ["git", "push", "origin", f"HEAD:{args.branch}"],
+        cwd=site,
+        capture_output=True,
+        text=True,
+    )
+    if push.returncode != 0:
+        print(push.stderr or push.stdout, file=sys.stderr)
+        print(
+            "push_to_frontend: git push failed. Ensure GROUNDPAGE_DEPLOY_TOKEN is a "
+            "fine-grained PAT with Contents → Read and write on grounded-page.",
+            file=sys.stderr,
+        )
+        return push.returncode
     print(f"push_to_frontend: pushed edition {date} to {args.branch}")
     return 0
 

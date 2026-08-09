@@ -76,6 +76,8 @@ jobs:
           ref: main
 
       - name: Push edition to frontend
+        env:
+          GROUNDPAGE_DEPLOY_TOKEN: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
         run: python scripts/push_to_frontend.py --site grounded-page --source-dir output
 
       - name: Upload edition artifact
