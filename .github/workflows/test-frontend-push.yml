@@ -1,0 +1,37 @@
+# Smoke test: verify GROUNDPAGE_DEPLOY_TOKEN can push to grounded-page.
+# Does NOT run the publish pipeline. Manual trigger only.
+
+name: Test frontend push
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout frontend repo
+        uses: actions/checkout@v5
+        with:
+          repository: Grounded-india/grounded-page
+          token: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+          path: grounded-page
+          ref: main
+
+      - name: Push a tiny marker file
+        env:
+          GROUNDPAGE_DEPLOY_TOKEN: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd grounded-page
+          git config user.name "GROUNDED Bot"
+          git config user.email "bot@grounded.india"
+          mkdir -p .github
+          printf 'ci-push-ok %s run=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ github.run_id }}" > .github/ci-push-test.txt
+          git add .github/ci-push-test.txt
+          git commit -m "chore(ci): push auth smoke test (${{ github.run_id }})"
+          git remote set-url origin "https://x-access-token:${GROUNDPAGE_DEPLOY_TOKEN}@github.com/Grounded-india/grounded-page.git"
+          git push origin HEAD:main
+          echo "SUCCESS: push to grounded-page/main worked"
