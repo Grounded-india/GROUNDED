@@ -87,5 +87,6 @@ jobs:
           name: edition-${{ github.run_id }}
           path: |
             output/edition-*.md
+            output/editions/**/*
             output/images/**/*
           if-no-files-found: ignore

@@ -9,6 +9,7 @@ source - so the page reads like a newsletter, not a wall of link noise.
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -40,9 +41,14 @@ def _trace(raw: Any) -> dict:
 
 
 def _slug(heading: str) -> str:
+    """GitHub-style anchor slug. Keeps Unicode marks (category M*) so Indic
+    headings — the translated editions — slug the same way a real markdown
+    renderer does. ``isalnum()`` is False for a Devanagari matra or a virama,
+    which would otherwise strip every vowel sign out of the anchor and leave the
+    TOC pointing at headings that no longer exist. No effect on ASCII."""
     out = []
     for ch in heading.strip().lower():
-        if ch.isalnum():
+        if ch.isalnum() or unicodedata.category(ch).startswith("M"):
             out.append(ch)
         elif ch in " -_":
             out.append("-")
