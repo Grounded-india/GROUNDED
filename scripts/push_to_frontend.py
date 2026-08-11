@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"push_to_frontend: copied → {synced['markdown']}")
     if synced["images"]:
         print(f"push_to_frontend: copied → {synced['images']}")
+    if synced.get("translations"):
+        print(f"push_to_frontend: copied → {synced['translations']}")
 
     author_name = os.environ.get("GIT_AUTHOR_NAME", "GROUNDED Bot")
     author_email = os.environ.get("GIT_AUTHOR_EMAIL", "bot@grounded.india")
@@ -88,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     add_paths = [str(synced["markdown"].relative_to(site))]
     if synced["images"]:
         add_paths.append(str(synced["images"].relative_to(site)))
+    if synced.get("translations"):
+        add_paths.append(str(synced["translations"].relative_to(site)))
     _run(["git", "add", *add_paths], cwd=site)
 
     diff = subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=site)

@@ -167,7 +167,9 @@ def _copy_translations_to_site(src_dir: "Path", site_dir: "Path | None") -> None
     import shutil
     from pathlib import Path
 
-    site_root = site_dir if site_dir is not None else _default_site_dir()
+    site_root = (
+        Path(site_dir).expanduser().resolve() if site_dir is not None else _default_site_dir()
+    )
     if not site_root.is_dir():
         click.echo(
             f"[publish] grounded-page not found at {site_root}; translations left "
@@ -175,11 +177,11 @@ def _copy_translations_to_site(src_dir: "Path", site_dir: "Path | None") -> None
             err=True,
         )
         return
-    dest = site_root / "content" / "editions" / src_dir.name
+    dest = site_root / "content" / "editions" / Path(src_dir).name
     dest.mkdir(parents=True, exist_ok=True)
     for f in sorted(Path(src_dir).glob("*.md")):
         shutil.copy2(f, dest / f.name)
-    click.echo(f"[publish] copied {src_dir.name}/ → {dest}")
+    click.echo(f"[publish] copied {Path(src_dir).name}/ → {dest}")
 
 
 @cli.command("enrich")

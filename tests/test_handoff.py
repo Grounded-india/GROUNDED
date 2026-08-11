@@ -34,3 +34,29 @@ def test_sync_edition_bundle_copies_md_and_images(tmp_path: Path):
     assert synced["markdown"].read_text(encoding="utf-8") == "# Edition\n"
     assert synced["images"] == site / "public" / "images" / date
     assert (synced["images"] / "photo.jpg").read_bytes() == b"jpeg"
+    # No translations folder → English-only path unchanged.
+    assert synced["translations"] is None
+
+
+def test_sync_edition_bundle_copies_translations_when_present(tmp_path: Path):
+    out = tmp_path / "output"
+    site = tmp_path / "site"
+    date = "2026-08-04"
+    edition = out / f"edition-{date}.md"
+    edition.parent.mkdir(parents=True)
+    edition.write_text("# Edition\n", encoding="utf-8")
+
+    tdir = out / "editions" / date
+    tdir.mkdir(parents=True)
+    (tdir / f"edition-{date}.en.md").write_text("# EN\n", encoding="utf-8")
+    (tdir / f"edition-{date}.hi.md").write_text("# HI\n", encoding="utf-8")
+
+    synced = sync_edition_bundle(edition_file=edition, site_root=site)
+
+    assert synced["translations"] == site / "content" / "editions" / date
+    assert (synced["translations"] / f"edition-{date}.en.md").read_text(
+        encoding="utf-8"
+    ) == "# EN\n"
+    assert (synced["translations"] / f"edition-{date}.hi.md").read_text(
+        encoding="utf-8"
+    ) == "# HI\n"
