@@ -1,6 +1,9 @@
-# Daily newspaper publish: run the full GROUNDED pipeline, then push the
-# edition bundle (markdown + images) to the grounded-page repo. Vercel (or any
-# host wired to grounded-page main) redeploys automatically on that push.
+# Daily newspaper publish: English edition first, translations second.
+#
+# The English crew already uses most of the 6h GitHub-hosted job budget.
+# Translation stays in the product, but it runs as a follow-up job with its
+# own clock so a slow Gemini pass can never cancel the paper or skip the
+# grounded-page push.
 #
 # Schedule: 12:00 IST = 06:30 UTC
 # Manual: Actions → Daily publish → Run workflow
@@ -65,7 +68,9 @@ jobs:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python publish.py --no-site
+        # English only. --no-translate keeps this job on the pre-translation
+        # critical path so the edition can still ship inside the 6h cap.
+        run: python publish.py --no-site --no-translate
 
       - name: Checkout frontend repo
         uses: actions/checkout@v5
@@ -84,9 +89,74 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: edition-${{ github.run_id }}
+          name: edition-bundle
           path: |
             output/edition-*.md
-            output/editions/**/*
             output/images/**/*
           if-no-files-found: ignore
+
+  translate:
+    needs: publish
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    continue-on-error: true
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install openai
+
+      - name: Download English edition
+        uses: actions/download-artifact@v6
+        with:
+          name: edition-bundle
+          path: .
+
+      - name: Translate edition
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          date_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          src="output/edition-${date_ist}.md"
+          if [ ! -f "$src" ]; then
+            src=$(ls -1t output/edition-*.md | head -1)
+          fi
+          if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
+            echo "no edition markdown to translate"
+            exit 1
+          fi
+          echo "translating $src"
+          python -m grounded.agents translate --src "$src" --no-site
+
+      - name: Checkout frontend repo
+        uses: actions/checkout@v5
+        with:
+          repository: Grounded-india/grounded-page
+          token: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+          path: grounded-page
+          ref: main
+
+      - name: Push translations to frontend
+        env:
+          GROUNDPAGE_DEPLOY_TOKEN: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          date_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          src="output/edition-${date_ist}.md"
+          if [ ! -f "$src" ]; then
+            src=$(ls -1t output/edition-*.md | head -1)
+          fi
+          python scripts/push_to_frontend.py --site grounded-page --source-dir output --edition "$src"

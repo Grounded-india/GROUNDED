@@ -5,11 +5,18 @@ backend pipeline and pushes the resulting newspaper to the frontend repo.
 
 ## What it does
 
-1. Starts Postgres (pgvector) in CI
-2. Runs `python publish.py --no-site` (wipe → ingest → embed → cluster → rank → scrape → crew → dedup → coherence → images → edition)
-3. Copies `output/edition-YYYY-MM-DD.md` and `output/images/YYYY-MM-DD/` into `grounded-page`
-4. Commits and pushes to `Grounded-india/grounded-page` on `main`
-5. Vercel (if connected to `grounded-page`) redeploys the live site automatically
+Two jobs, so translation cannot eat the English paper's 6-hour GitHub cap:
+
+1. **`publish`** — Postgres, then `python publish.py --no-site --no-translate`
+   (wipe → ingest → embed → cluster → rank → scrape → crew → dedup →
+   coherence → images → English edition). Pushes `edition-YYYY-MM-DD.md` +
+   images to `grounded-page` and uploads an artifact.
+2. **`translate`** — starts only after `publish` succeeds. Downloads the
+   artifact, runs `python -m grounded.agents translate`, pushes `hi`/`kn`/`mr`/`te`
+   files if they land. `continue-on-error: true`: a Gemini failure leaves
+   yesterday's English edition live.
+
+Local `python publish.py` still translates by default. Skip with `--no-translate`.
 
 ## Schedule
 
@@ -39,13 +46,17 @@ If push fails with `Permission denied to <your-username>`, the token is missing 
 ## Local equivalent
 
 ```bash
-python publish.py --no-site
+python publish.py --no-site --no-translate
 python scripts/push_to_frontend.py --site ../grounded-page --source-dir output
+# optional, after the English file exists:
+python -m grounded.agents translate --date YYYY-MM-DD --site ../grounded-page
 ```
 
-Or use `python publish.py` without `--no-site` to copy locally (no git push).
+Or use `python publish.py` without `--no-site` to copy locally (includes
+translation unless you pass `--no-translate`).
 
 ## Runtime
 
-A full publish can take **1–3 hours** in CI (LLM calls for ~20 stories). The job
-timeout is set to 360 minutes.
+English crew can take **4–6 hours** in CI (Nemotron calls for ~20 stories plus
+top-up). That job's timeout is 360 minutes — GitHub-hosted max. Translation
+gets its own 180-minute job afterwards.

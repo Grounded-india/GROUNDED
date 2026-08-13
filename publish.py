@@ -14,7 +14,8 @@ Run:
     python publish.py --skip-wipe     # keep existing DB contents
     python publish.py --limit 30      # override top-N
     python publish.py --no-site       # skip copy into ../grounded-page
-    python publish.py --no-translate  # English only
+    python publish.py --no-translate  # English only (CI uses this so translation
+                                      # cannot blow the 6h Actions cap)
     python publish.py --lang hi --lang bn   # override target languages
 
 Output:
