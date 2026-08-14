@@ -7,6 +7,8 @@
 #
 # Schedule: 12:00 IST = 06:30 UTC
 # Manual: Actions → Daily publish → Run workflow
+#   - leave "translate_only" unchecked for a full publish
+#   - check "translate_only" and set "edition_date" to re-translate a shipped day
 
 name: Daily publish
 
@@ -14,6 +16,15 @@ on:
   schedule:
     - cron: "30 6 * * *"
   workflow_dispatch:
+    inputs:
+      translate_only:
+        description: "Skip English publish; only translate an already-shipped edition"
+        type: boolean
+        default: false
+      edition_date:
+        description: "Edition date YYYY-MM-DD (IST). Empty = today IST."
+        type: string
+        default: ""
 
 concurrency:
   group: daily-publish
@@ -30,6 +41,7 @@ env:
 
 jobs:
   publish:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.translate_only != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -90,17 +102,27 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: edition-bundle
+          # Only ship today's IST edition + its images. Uploading every historical
+          # output/edition-*.md bloated the artifact and invited wrong-date fallbacks.
           path: |
             output/edition-*.md
-            output/images/**/*
+            output/images/**
           if-no-files-found: ignore
 
   translate:
     needs: publish
-    if: success()
+    # Run after a successful publish, OR on a translate-only manual dispatch
+    # (needs.publish.result is 'skipped' when publish is gated off).
+    if: |
+      always() && (
+        needs.publish.result == 'success' ||
+        (github.event_name == 'workflow_dispatch' && inputs.translate_only == true)
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    continue-on-error: true
+    # Fail the workflow when translation picks the wrong day or cannot push —
+    # silent success with stale editions is worse than a red X.
+    continue-on-error: false
 
     steps:
       - name: Checkout backend
@@ -118,26 +140,76 @@ jobs:
           pip install -e .
           pip install openai
 
-      - name: Download English edition
+      - name: Resolve edition date
+        id: edition
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.edition_date }}" ]; then
+            date_ist="${{ inputs.edition_date }}"
+          else
+            date_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          fi
+          echo "date=$date_ist" >> "$GITHUB_OUTPUT"
+          echo "Resolved edition date: $date_ist"
+
+      - name: Download English edition artifact
+        if: ${{ needs.publish.result == 'success' }}
         uses: actions/download-artifact@v6
         with:
           name: edition-bundle
-          path: .
+          # upload-artifact strips the common `output/` prefix, so download INTO
+          # output/ or the files land at the workspace root and we silently fall
+          # back to stale checked-in markdown under output/.
+          path: output
+
+      - name: Load English edition from grounded-page
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.translate_only == true }}
+        uses: actions/checkout@v5
+        with:
+          repository: Grounded-india/grounded-page
+          token: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
+          path: grounded-page-src
+          ref: main
+
+      - name: Stage English edition for translate-only
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.translate_only == true }}
+        run: |
+          set -euo pipefail
+          date_ist="${{ steps.edition.outputs.date }}"
+          mkdir -p output/images
+          src="grounded-page-src/content/editions/edition-${date_ist}.md"
+          if [ ! -f "$src" ]; then
+            echo "grounded-page has no English edition at $src"
+            exit 1
+          fi
+          cp "$src" "output/edition-${date_ist}.md"
+          if [ -d "grounded-page-src/public/images/${date_ist}" ]; then
+            rm -rf "output/images/${date_ist}"
+            cp -R "grounded-page-src/public/images/${date_ist}" "output/images/${date_ist}"
+          fi
+          echo "staged $src for translation"
 
       - name: Translate edition
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
-          date_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          date_ist="${{ steps.edition.outputs.date }}"
           src="output/edition-${date_ist}.md"
           if [ ! -f "$src" ]; then
-            src=$(ls -1t output/edition-*.md | head -1)
-          fi
-          if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
-            echo "no edition markdown to translate"
+            echo "missing $src after staging/download; refusing to translate a stale edition"
+            echo "output/ contains:"
+            ls -la output/ || true
             exit 1
           fi
+          # Guard against accidentally translating a different day's file.
+          case "$(basename "$src")" in
+            "edition-${date_ist}.md") ;;
+            *)
+              echo "refusing to translate $src for requested date $date_ist"
+              exit 1
+              ;;
+          esac
           echo "translating $src"
           python -m grounded.agents translate --src "$src" --no-site
 
@@ -154,9 +226,10 @@ jobs:
           GROUNDPAGE_DEPLOY_TOKEN: ${{ secrets.GROUNDPAGE_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
-          date_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          date_ist="${{ steps.edition.outputs.date }}"
           src="output/edition-${date_ist}.md"
-          if [ ! -f "$src" ]; then
-            src=$(ls -1t output/edition-*.md | head -1)
-          fi
-          python scripts/push_to_frontend.py --site grounded-page --source-dir output --edition "$src"
+          python scripts/push_to_frontend.py \
+            --site grounded-page \
+            --source-dir output \
+            --date "$date_ist" \
+            --edition "$src"

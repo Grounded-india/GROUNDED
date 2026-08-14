@@ -60,12 +60,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--branch", default="main", help="Frontend branch to push")
     args = parser.parse_args(argv)
 
-    date = args.date or datetime.now().strftime("%Y-%m-%d")
-    edition = (
-        Path(args.edition).expanduser().resolve()
-        if args.edition
-        else (Path(args.source_dir).expanduser().resolve() / f"edition-{date}.md")
-    )
+    date = args.date
+    if args.edition:
+        edition = Path(args.edition).expanduser().resolve()
+        if date is None:
+            # Derive from filename so a wrong wall-clock (UTC vs IST) cannot
+            # label the commit as a different day than the files being pushed.
+            stem = edition.stem  # edition-YYYY-MM-DD
+            if stem.startswith("edition-") and len(stem) >= len("edition-YYYY-MM-DD"):
+                date = stem[len("edition-") :]
+    else:
+        edition = Path(args.source_dir).expanduser().resolve() / (
+            f"edition-{(date or datetime.now().strftime('%Y-%m-%d'))}.md"
+        )
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
     site = Path(args.site).expanduser().resolve()
 
     if not edition.is_file():
