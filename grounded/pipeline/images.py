@@ -20,6 +20,7 @@ copy is a backup only, in case the source drops the file.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
@@ -64,13 +65,32 @@ _URL_BLOCKLIST = (
     "1x1.", "pixel.", "beacon",
     "avatar",
     "/subscribe", "/paywall",
+    # Stable id of the Google News "G" mark. The interstitial's og:image is
+    # this file at every size (…=s0-w300 and friends). It is not a photo.
+    "j6_cofbogxhri9im864nl_ligxvsqp2aupskei7z0cnnfdvgumwuy20nuuhkreqyrpy4beeibuc",
+    "googlelogo",
+    "/images/branding/",
 )
 
-# Fallback-search image blocklist for domains that block hotlinking or serve junk.
+# Hosts that never serve a story photo. lh3.googleusercontent.com is NOT
+# listed: some publishers really host photos there. The G logo is caught by
+# the id above.
 _HOST_BLOCKLIST = frozenset({
     "lookaside.fbsbx.com", "scontent.fbcdn.net",  # Facebook CDN, blocks hotlinks
     "pbs.twimg.com",                              # X CDN, unreliable
+    "news.google.com",
+    "ssl.gstatic.com", "www.gstatic.com", "fonts.gstatic.com",
 })
+
+_VISION_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+# Gemini rejects oversized inline images with INVALID_ARGUMENT.
+_VISION_MAX_BYTES = 4_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +214,23 @@ def _closest_caption(img_tag) -> str:
     return ""
 
 
+def _page_host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
 def extract_image_candidates(
     article_url: str, html: str, credit: str
 ) -> list[ImageCandidate]:
     """Parse an article HTML and return scored image candidates."""
+    # The Google News wrapper's og:image is the same "G" logo on every story.
+    # If URL decode failed, refuse that page instead of treating the logo as
+    # the lead photo. The caller then tries the headline fallback.
+    if _page_host(article_url) == "news.google.com":
+        return []
+
     soup = BeautifulSoup(html, "lxml")
 
     # First, prefer og:image / twitter:image — these are the publisher's own
@@ -692,6 +725,38 @@ def _load_all_images_with_body() -> dict:
     return grouped
 
 
+def image_data_url(path: Path) -> str | None:
+    """Inline a cached image so Gemini does not have to fetch the remote URL.
+
+    The 2026-09-26 run sent the Google logo hotlink and Gemini answered
+    ``400 INVALID_ARGUMENT`` for all 23 stories, which left the logo in place.
+    A local file also survives publisher CDNs that block Google's fetcher.
+    """
+    if not path.is_file():
+        return None
+    mime = _VISION_MIME.get(path.suffix.lower())
+    if mime is None:
+        return None
+    data = path.read_bytes()
+    if not data or len(data) > _VISION_MAX_BYTES:
+        return None
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def vision_image_ref(row: dict, output_root: Path) -> str | None:
+    """Prefer the cached file. Fall back to a non-junk remote URL."""
+    local = row.get("local_path") or ""
+    if local:
+        ref = image_data_url(output_root / local)
+        if ref:
+            return ref
+    remote = (row.get("source_url") or "").strip()
+    if remote.startswith("http") and not _url_is_junk(remote):
+        return remote
+    return None
+
+
 def _vision_verify_gemini(
     backend, system: str, user_text: str, image_urls: list[str]
 ) -> str:
@@ -781,6 +846,7 @@ def verify_and_dedup_images() -> dict:
     """Vision-based pass over story_images: drop irrelevant, dedupe visual
     duplicates, rewrite captions. Requires GEMINI_API_KEY; no-op otherwise."""
     from grounded.agents.llm import extract_json, make_gemini
+    from grounded.config import settings
 
     backend = make_gemini()
     if backend is None or getattr(backend, "is_local", False):
@@ -801,10 +867,24 @@ def verify_and_dedup_images() -> dict:
         imgs = bucket["images"]
         if not imgs:
             continue
+        output_root = Path(settings.output_dir)
+        attached = [
+            (r, ref)
+            for r in imgs
+            if (ref := vision_image_ref(r, output_root))
+        ]
+        if not attached:
+            log.warning(
+                "image verify skipped for %s: no readable image",
+                bucket["headline"][:60],
+            )
+            errors += 1
+            continue
+        review_rows = [r for r, _ref in attached]
         image_block = "\n".join(
             f"- id={r['image_id']}, url={r['source_url']}, "
             f"current_caption={r['caption'] or '(none)'}"
-            for r in imgs
+            for r in review_rows
         )
         user = (
             f"STORY HEADLINE: {bucket['headline']}\n"
@@ -817,7 +897,7 @@ def verify_and_dedup_images() -> dict:
         try:
             raw = _vision_verify_gemini(
                 backend, _IMAGE_VERIFY_SYSTEM, user,
-                [r["source_url"] for r in imgs],
+                [ref for _row, ref in attached],
             )
             data = extract_json(raw)
         except Exception as e:
@@ -831,14 +911,14 @@ def verify_and_dedup_images() -> dict:
             errors += 1
             continue
 
-        di, dd, rc = _apply_image_verdicts(imgs, verdicts)
-        total_checked += len(imgs)
+        di, dd, rc = _apply_image_verdicts(review_rows, verdicts)
+        total_checked += len(review_rows)
         total_drop_irrelevant += di
         total_drop_dupe += dd
         total_recap += rc
         log.info(
             "%s: reviewed %d, dropped %d irrelevant, %d dupe, recaptioned %d",
-            bucket["headline"][:60], len(imgs), di, dd, rc,
+            bucket["headline"][:60], len(review_rows), di, dd, rc,
         )
 
     return {

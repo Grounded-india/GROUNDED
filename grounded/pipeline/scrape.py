@@ -70,6 +70,25 @@ def _host(url: str) -> str:
         return ""
 
 
+def _decode_ok(result: object) -> str | None:
+    """Pull a publisher URL out of a googlenewsdecoder result.
+
+    0.1.x returns ``{"status": True, "decoded_url": ...}``. 0.2+ renamed that
+    flag to ``success`` and left ``status`` unset. Checking only ``status`` dropped
+    every successful decode, so scrape and image fetch stayed on the Google
+    News interstitial.
+    """
+    if not isinstance(result, dict):
+        return None
+    ok = result.get("success", result.get("status"))
+    decoded = (result.get("decoded_url") or "").strip()
+    if not ok or not decoded:
+        return None
+    if _host(decoded) in ("", "news.google.com"):
+        return None
+    return decoded
+
+
 def _resolve_url(url: str) -> str:
     """
     Google News RSS URLs are opaque redirect wrappers that land on a JS
@@ -80,12 +99,29 @@ def _resolve_url(url: str) -> str:
     if host != "news.google.com":
         return url
     try:
-        result = gnewsdecoder(url, interval=1)
+        result = gnewsdecoder(url, interval=1, timeout=15)
+    except TypeError:
+        # 0.1.x has no timeout argument.
+        try:
+            result = gnewsdecoder(url, interval=1)
+        except Exception as e:
+            log.warning("gnewsdecoder threw on %s: %s", url, e)
+            return url
     except Exception as e:
         log.warning("gnewsdecoder threw on %s: %s", url, e)
         return url
-    if isinstance(result, dict) and result.get("status") and result.get("decoded_url"):
-        return result["decoded_url"]
+    decoded = _decode_ok(result)
+    if decoded:
+        log.info("decoded Google News URL -> %s", _host(decoded))
+        return decoded
+    message = ""
+    if isinstance(result, dict):
+        message = str(result.get("message") or result.get("error") or "")
+    log.warning(
+        "gnewsdecoder did not resolve %s (%s)",
+        url[:140],
+        message or "no decoded_url",
+    )
     return url
 
 
