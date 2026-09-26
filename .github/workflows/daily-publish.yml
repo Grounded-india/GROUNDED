@@ -35,7 +35,7 @@ env:
   OUTPUT_DIR: ./output
   EMBEDDING_BACKEND: voyage
   GEMINI_MODEL: gemini-flash-lite-latest
-  NEMOTRON_MODEL: nvidia/nemotron-3-super-120b-a12b
+  NEMOTRON_MODEL: nvidia/nemotron-3-ultra-550b-a55b
   GIT_AUTHOR_NAME: GROUNDED Bot
   GIT_AUTHOR_EMAIL: bot@grounded.india
 

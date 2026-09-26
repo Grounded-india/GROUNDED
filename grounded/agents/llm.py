@@ -30,9 +30,9 @@ DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 NEMOTRON_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # Hosted NIM retired llama-3.3-nemotron-super-49b-v1.5 on 2026-08-26 (HTTP 410).
-# Nemotron 3 Super is the current drop-in on integrate.api.nvidia.com. Ultra
-# 550B also works (set NEMOTRON_MODEL). Nano 30B is also EOL.
-DEFAULT_NEMOTRON_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+# Nemotron 3 Ultra 550B is the crew model. Super 120B is the smaller
+# alternative (set NEMOTRON_MODEL). Nano 30B is also EOL.
+DEFAULT_NEMOTRON_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 # NOTE: gemini-2.5-flash is retired for new API keys (returns 404). The *-lite
 # aliases are the reliably-callable, current flash tier on the free plan. Bump to
 # gemini-flash-latest / gemini-2.5-pro via GEMINI_MODEL if your quota allows it.
