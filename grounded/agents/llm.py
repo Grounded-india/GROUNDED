@@ -29,14 +29,10 @@ DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 # client class drives both - only base_url / key / model differ.
 NEMOTRON_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-# The 49B "super" reliably follows the "respond only with JSON" instruction and
-# produces clean, parseable output. Smaller/faster nano models (e.g.
-# nemotron-3-nano-30b) ignore JSON mode on complex prompts and emit reasoning
-# prose + numbered lists instead, which cannot be parsed - so we default to super
-# for correctness. It is slower (~80-130s/call on the free tier); json_mode keeps
-# it from rambling to the token cap. Override with NEMOTRON_MODEL if you have a
-# faster endpoint or want to trade quality for speed.
-DEFAULT_NEMOTRON_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+# Hosted NIM retired llama-3.3-nemotron-super-49b-v1.5 on 2026-08-26 (HTTP 410).
+# Nemotron 3 Super is the current drop-in on integrate.api.nvidia.com. Ultra
+# 550B also works (set NEMOTRON_MODEL). Nano 30B is also EOL.
+DEFAULT_NEMOTRON_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 # NOTE: gemini-2.5-flash is retired for new API keys (returns 404). The *-lite
 # aliases are the reliably-callable, current flash tier on the free plan. Bump to
 # gemini-flash-latest / gemini-2.5-pro via GEMINI_MODEL if your quota allows it.

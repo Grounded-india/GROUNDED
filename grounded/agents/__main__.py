@@ -634,6 +634,15 @@ def cmd_publish(
     )
 
     # 7. EDITION.
+    approved_final = _approved_count()
+    if approved_final < 1:
+        raise click.ClickException(
+            f"publish produced 0 approved stories after crew + top-up "
+            f"({(time.monotonic() - t0) / 60:.1f} min). Refusing to write or "
+            "push an empty edition — check the Nemotron model (retired IDs "
+            "return HTTP 410) and scrape logs."
+        )
+
     click.echo("[publish] rendering edition...")
     md = render_edition(approved_only=True)
     out_path = out_dir / f"edition-{datetime.now():%Y-%m-%d}.md"
